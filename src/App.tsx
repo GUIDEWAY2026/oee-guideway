@@ -43,6 +43,7 @@ import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import { supabase } from '@/lib/supabase';
 
 // Types for our OEE data
 interface OEEInputs {
@@ -130,6 +131,52 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inputs'>('dashboard');
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [history, setHistory] = useState<any[]>([]);
+
+  // Carregar histórico do Supabase
+  const fetchHistory = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('oee_records')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(10);
+      
+      if (error) throw error;
+      if (data) setHistory(data);
+    } catch (error) {
+      console.error('Erro ao buscar histórico:', error);
+    }
+  };
+
+  // Salvar registro no Supabase
+  const saveRecord = async () => {
+    try {
+      const record = {
+        machine_name: inputs.line,
+        sku: inputs.sku,
+        availability: results.disponibilidade,
+        performance: results.performance,
+        quality: results.qualidade,
+        oee_score: results.oee,
+        shift: `Turnos: ${inputs.K}`,
+        notes: `Produção Real: ${inputs.H}`
+      };
+
+      const { error } = await supabase
+        .from('oee_records')
+        .insert([record]);
+
+      if (error) throw error;
+      fetchHistory(); // Atualiza a lista após salvar
+    } catch (error) {
+      console.error('Erro ao salvar registro:', error);
+    }
+  };
+
+  useEffect(() => {
+    fetchHistory();
+  }, []);
 
   // Calculation logic based on the provided formulas
   const results = useMemo((): OEEResults => {
@@ -187,9 +234,20 @@ export default function App() {
 
   const generateAIAnalysis = async () => {
     setIsAnalyzing(true);
+    setAiAnalysis(''); // Limpa análise anterior
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-      const model = "gemini-3.1-flash-lite-preview";
+      // Em Vite/Netlify, usamos import.meta.env.VITE_...
+      // process.env é para o ambiente do AI Studio
+      const apiKey = (import.meta.env && import.meta.env.VITE_GEMINI_API_KEY) || 
+                     (typeof process !== 'undefined' && process.env && process.env.GEMINI_API_KEY);
+      
+      if (!apiKey) {
+        throw new Error('Chave de API não encontrada. Certifique-se de que VITE_GEMINI_API_KEY está configurada no Netlify e que você fez um novo Deploy.');
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
+      // Usando o modelo flash mais estável
+      const model = "gemini-3-flash-preview";
       
       const prompt = `Você é um especialista em eficiência industrial (OEE) da OEE GUIDEWAY. 
       Analise os seguintes dados da ${inputs.line} produzindo o SKU ${inputs.sku}:
@@ -237,13 +295,22 @@ export default function App() {
 
       const response = await ai.models.generateContent({
         model,
-        contents: prompt,
+        contents: [{ parts: [{ text: prompt }] }],
       });
 
-      setAiAnalysis(response.text || 'Não foi possível gerar a análise no momento.');
-    } catch (error) {
+      const text = response.text;
+      if (!text) {
+        throw new Error('A IA retornou uma resposta vazia.');
+      }
+
+      setAiAnalysis(text);
+      
+      // Salva no banco após gerar a análise com sucesso
+      saveRecord();
+    } catch (error: any) {
       console.error('Erro na análise IA:', error);
-      setAiAnalysis('Erro ao conectar com o serviço de IA. Verifique sua conexão e tente novamente.');
+      const errorMessage = error.message || 'Erro desconhecido';
+      setAiAnalysis(`### ⚠️ Erro na Análise\n\nNão foi possível gerar o insight. Detalhes: ${errorMessage}\n\n**Dica:** Verifique se a chave de API no Netlify está correta e se você limpou o cache no último deploy.`);
     } finally {
       setIsAnalyzing(false);
     }
