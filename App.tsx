@@ -1027,7 +1027,7 @@ export default function App() {
                     <div className="bg-indigo-600/10 px-8 py-4 border-b border-indigo-500/20 flex items-center justify-between">
                       <div className="flex items-center gap-3">
                         <div className="p-2 bg-indigo-600 rounded-lg">
-                          <Sparkles size={18} className=\"text-white\" />
+                          <Sparkles size={18} className="text-white" />
                         </div>
                         <h3 className="font-bold text-indigo-100">Análise Crítica Guideway AI</h3>
                       </div>
@@ -1039,18 +1039,18 @@ export default function App() {
                     </div>
                     <div className="p-8">
                       {isAnalyzing ? (
-                        <div className=\"space-y-4\">
-                          <div className=\"h-4 bg-white/5 rounded w-3/4 animate-pulse\" />
-                          <div className=\"h-4 bg-white/5 rounded w-full animate-pulse\" />
-                          <div className=\"h-4 bg-white/5 rounded w-5/6 animate-pulse\" />
+                        <div className="space-y-4">
+                          <div className="h-4 bg-white/5 rounded w-3/4 animate-pulse" />
+                          <div className="h-4 bg-white/5 rounded w-full animate-pulse" />
+                          <div className="h-4 bg-white/5 rounded w-5/6 animate-pulse" />
                         </div>
                       ) : (
-                        <div className=\"prose prose-invert prose-sm max-w-none 
+                        <div className="prose prose-invert prose-sm max-w-none 
                           prose-headings:text-emerald-400 prose-headings:font-bold prose-headings:mt-6 prose-headings:mb-3 
                           prose-strong:text-white prose-strong:font-bold 
                           prose-p:text-slate-200 prose-p:leading-relaxed prose-p:mb-4
                           prose-hr:border-white/10 prose-hr:my-6
-                          prose-table:text-xs prose-th:text-emerald-400 prose-td:text-slate-300\">
+                          prose-table:text-xs prose-th:text-emerald-400 prose-td:text-slate-300">
                           <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{aiAnalysis}</Markdown>
                         </div>
                       )}
@@ -1074,25 +1074,25 @@ export default function App() {
                   </button>
                 </div>
                 <div className="overflow-x-auto">
-                  <table className=\"w-full text-left\">
+                  <table className="w-full text-left">
                     <thead>
-                      <tr className=\"bg-white/5 border-b border-white/10\">
-                        <th className=\"px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest\">Data</th>
-                        <th className=\"px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest\">Linha</th>
-                        <th className=\"px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest\">SKU</th>
-                        <th className=\"px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center\">OEE</th>
+                      <tr className="bg-white/5 border-b border-white/10">
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
                       </tr>
                     </thead>
-                    <tbody className=\"divide-y divide-white/10\">
+                    <tbody className="divide-y divide-white/10">
                       {history.length > 0 ? (
                         history.map((record) => (
-                          <tr key={record.id} className=\"hover:bg-white/5 transition-colors\">
-                            <td className=\"px-8 py-4 text-xs text-slate-400\">
+                          <tr key={record.id} className="hover:bg-white/5 transition-colors">
+                            <td className="px-8 py-4 text-xs text-slate-400">
                               {new Date(record.created_at).toLocaleString('pt-BR')}
                             </td>
-                            <td className=\"px-8 py-4 text-xs font-bold text-white\">{record.machine_name}</td>
-                            <td className=\"px-8 py-4 text-xs text-slate-400\">{record.sku}</td>
-                            <td className=\"px-8 py-4 text-center\">
+                            <td className="px-8 py-4 text-xs font-bold text-white">{record.machine_name}</td>
+                            <td className="px-8 py-4 text-xs text-slate-400">{record.sku}</td>
+                            <td className="px-8 py-4 text-center">
                               <span className={`text-xs font-bold px-2 py-1 rounded ${
                                 record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
                                 record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
@@ -1104,7 +1104,7 @@ export default function App() {
                         ))
                       ) : (
                         <tr>
-                          <td colSpan={4} className=\"px-8 py-10 text-center text-slate-500 text-sm italic\">
+                          <td colSpan={4} className="px-8 py-10 text-center text-slate-500 text-sm italic">
                             Nenhum registro encontrado no banco de dados.
                           </td>
                         </tr>
