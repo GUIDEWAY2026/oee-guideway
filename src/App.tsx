@@ -128,24 +128,27 @@ export default function App() {
     U: 2500
   });
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inputs'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inputs' | 'evolution'>('dashboard');
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [history, setHistory] = useState<any[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   // Carregar histórico do Supabase
   const fetchHistory = async () => {
+    setHistoryError(null);
     try {
       const { data, error } = await supabase
         .from('oee_records')
         .select('*')
         .order('created_at', { ascending: false })
-        .limit(10);
+        .limit(20);
       
       if (error) throw error;
       if (data) setHistory(data);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Erro ao buscar histórico:', error);
+      setHistoryError(error.message || 'Erro de conexão com o banco de dados');
     }
   };
 
@@ -677,6 +680,13 @@ export default function App() {
             <span className="hidden md:inline">Dashboard</span>
           </button>
           <button 
+            onClick={() => { setActiveTab('evolution'); setShowAdminPanel(false); fetchHistory(); }}
+            className={`flex-1 md:flex-none flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'evolution' && !showAdminPanel ? 'bg-blue-600 text-white font-semibold shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:bg-white/5'}`}
+          >
+            <TrendingUp size={20} />
+            <span className="hidden md:inline">Evolução</span>
+          </button>
+          <button 
             onClick={() => { setActiveTab('inputs'); setShowAdminPanel(false); }}
             className={`flex-1 md:flex-none flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'inputs' && !showAdminPanel ? 'bg-blue-600 text-white font-semibold shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:bg-white/5'}`}
           >
@@ -1058,6 +1068,134 @@ export default function App() {
                   </motion.div>
                 )}
               </AnimatePresence>
+            </motion.div>
+          ) : activeTab === 'evolution' ? (
+            <motion.div 
+              key="evolution"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="max-w-6xl mx-auto space-y-8"
+            >
+              <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                <div>
+                  <h2 className="text-3xl font-bold tracking-tight text-white">Evolução Histórica</h2>
+                  <p className="text-slate-400 mt-1">Acompanhamento do desempenho OEE ao longo do tempo.</p>
+                </div>
+                <button 
+                  onClick={fetchHistory}
+                  className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10"
+                >
+                  <RefreshCw size={14} />
+                  Atualizar Dados
+                </button>
+              </header>
+
+              {/* Gráfico de Evolução */}
+              <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
+                <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
+                  <BarChart3 size={20} className="text-indigo-400" />
+                  Tendência de OEE Global (%)
+                </h3>
+                <div className="h-[300px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={[...history].reverse()}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                      <XAxis 
+                        dataKey="created_at" 
+                        tickFormatter={(str) => new Date(str).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
+                        tick={{ fontSize: 10, fill: '#94a3b8' }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <YAxis 
+                        domain={[0, 100]}
+                        tick={{ fontSize: 10, fill: '#94a3b8' }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                        labelFormatter={(label) => new Date(label).toLocaleString('pt-BR')}
+                        formatter={(value: number) => [value.toFixed(1) + '%', 'OEE']}
+                      />
+                      <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
+                        {history.map((entry, index) => (
+                          <Cell 
+                            key={`cell-${index}`} 
+                            fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
+                          />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Histórico Recente Section */}
+              <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
+                <div className="px-8 py-5 bg-white/5 border-b border-white/10">
+                  <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
+                    <Clock size={16} className="text-blue-400" />
+                    Registros Detalhados
+                  </h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-white/5 border-b border-white/10">
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/10">
+                      {historyError ? (
+                        <tr>
+                          <td colSpan={7} className="px-8 py-10 text-center">
+                            <div className="flex flex-col items-center gap-2 text-red-400">
+                              <AlertTriangle size={24} />
+                              <p className="text-sm font-bold">Erro ao carregar histórico</p>
+                              <p className="text-[10px] opacity-70">{historyError}</p>
+                            </div>
+                          </td>
+                        </tr>
+                      ) : history.length > 0 ? (
+                        history.map((record) => (
+                          <tr key={record.id} className="hover:bg-white/5 transition-colors">
+                            <td className="px-8 py-4 text-xs text-slate-400">
+                              {new Date(record.created_at).toLocaleString('pt-BR')}
+                            </td>
+                            <td className="px-8 py-4 text-xs font-bold text-white">{record.machine_name}</td>
+                            <td className="px-8 py-4 text-xs text-slate-400">{record.sku}</td>
+                            <td className="px-8 py-4 text-center text-xs text-slate-300">{record.availability.toFixed(1)}%</td>
+                            <td className="px-8 py-4 text-center text-xs text-slate-300">{record.performance.toFixed(1)}%</td>
+                            <td className="px-8 py-4 text-center text-xs text-slate-300">{record.quality.toFixed(1)}%</td>
+                            <td className="px-8 py-4 text-center">
+                              <span className={`text-xs font-bold px-2 py-1 rounded ${
+                                record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
+                                record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
+                              }`}>
+                                {record.oee_score.toFixed(1)}%
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={7} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                            Nenhum registro encontrado no banco de dados.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </motion.div>
           ) : (
             <motion.div 
