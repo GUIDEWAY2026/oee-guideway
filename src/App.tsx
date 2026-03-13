@@ -133,22 +133,48 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [history, setHistory] = useState<any[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [lineFilter, setLineFilter] = useState<string>('Todas');
 
   // Carregar histórico do Supabase
   const fetchHistory = async () => {
     setHistoryError(null);
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('oee_records')
         .select('*')
-        .order('created_at', { ascending: false })
-        .limit(20);
+        .order('created_at', { ascending: false });
+      
+      if (lineFilter !== 'Todas') {
+        query = query.eq('machine_name', lineFilter);
+      }
+
+      const { data, error } = await query.limit(30);
       
       if (error) throw error;
       if (data) setHistory(data);
     } catch (error: any) {
       console.error('Erro ao buscar histórico:', error);
       setHistoryError(error.message || 'Erro de conexão com o banco de dados');
+    }
+  };
+
+  // Excluir registro do Supabase
+  const deleteRecord = async (id: string) => {
+    if (!confirm('Tem certeza que deseja excluir este registro permanentemente?')) return;
+    
+    try {
+      const { error } = await supabase
+        .from('oee_records')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+      
+      // Atualiza o estado local removendo o item
+      setHistory(prev => prev.filter(item => item.id !== id));
+    } catch (error: any) {
+      console.error('Erro ao excluir registro:', error);
+      alert('Erro ao excluir: ' + error.message);
     }
   };
 
@@ -179,7 +205,7 @@ export default function App() {
 
   useEffect(() => {
     fetchHistory();
-  }, []);
+  }, [lineFilter]);
 
   // Calculation logic based on the provided formulas
   const results = useMemo((): OEEResults => {
@@ -1082,13 +1108,28 @@ export default function App() {
                   <h2 className="text-3xl font-bold tracking-tight text-white">Evolução Histórica</h2>
                   <p className="text-slate-400 mt-1">Acompanhamento do desempenho OEE ao longo do tempo.</p>
                 </div>
-                <button 
-                  onClick={fetchHistory}
-                  className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10"
-                >
-                  <RefreshCw size={14} />
-                  Atualizar Dados
-                </button>
+                <div className="flex items-center gap-3">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Linha</span>
+                    <select 
+                      value={lineFilter}
+                      onChange={(e) => setLineFilter(e.target.value)}
+                      className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer min-w-[140px]"
+                    >
+                      <option value="Todas">Todas as Linhas</option>
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+                        <option key={num} value={`Linha 0${num}`}>Linha 0{num}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button 
+                    onClick={fetchHistory}
+                    className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2.5 rounded-xl text-xs font-bold transition-all border border-white/10 mt-5"
+                  >
+                    <RefreshCw size={14} />
+                    Atualizar
+                  </button>
+                </div>
               </header>
 
               {/* Gráfico de Evolução */}
@@ -1151,12 +1192,13 @@ export default function App() {
                         <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
                         <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
                         <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/10">
                       {historyError ? (
                         <tr>
-                          <td colSpan={7} className="px-8 py-10 text-center">
+                          <td colSpan={8} className="px-8 py-10 text-center">
                             <div className="flex flex-col items-center gap-2 text-red-400">
                               <AlertTriangle size={24} />
                               <p className="text-sm font-bold">Erro ao carregar histórico</p>
@@ -1166,7 +1208,7 @@ export default function App() {
                         </tr>
                       ) : history.length > 0 ? (
                         history.map((record) => (
-                          <tr key={record.id} className="hover:bg-white/5 transition-colors">
+                          <tr key={record.id} className="hover:bg-white/5 transition-colors group">
                             <td className="px-8 py-4 text-xs text-slate-400">
                               {new Date(record.created_at).toLocaleString('pt-BR')}
                             </td>
@@ -1183,12 +1225,21 @@ export default function App() {
                                 {record.oee_score.toFixed(1)}%
                               </span>
                             </td>
+                            <td className="px-8 py-4 text-right">
+                              <button 
+                                onClick={() => deleteRecord(record.id)}
+                                className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                title="Excluir Registro"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            </td>
                           </tr>
                         ))
                       ) : (
                         <tr>
-                          <td colSpan={7} className="px-8 py-10 text-center text-slate-500 text-sm italic">
-                            Nenhum registro encontrado no banco de dados.
+                          <td colSpan={8} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                            Nenhum registro encontrado para esta linha.
                           </td>
                         </tr>
                       )}
