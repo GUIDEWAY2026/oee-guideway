@@ -134,6 +134,7 @@ export default function App() {
   const [history, setHistory] = useState<any[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lineFilter, setLineFilter] = useState<string>('Todas');
+  const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
 
   // Carregar histórico do Supabase
   const fetchHistory = async () => {
@@ -148,7 +149,15 @@ export default function App() {
         query = query.eq('machine_name', lineFilter);
       }
 
-      const { data, error } = await query.limit(30);
+      // Filtro de Mês
+      const year = parseInt(monthFilter.split('-')[0]);
+      const month = parseInt(monthFilter.split('-')[1]);
+      const startDate = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
+      const endDate = new Date(year, month, 0, 23, 59, 59).toISOString();
+      
+      query = query.gte('created_at', startDate).lte('created_at', endDate);
+
+      const { data, error } = await query.limit(31);
       
       if (error) throw error;
       if (data) setHistory(data);
@@ -205,7 +214,7 @@ export default function App() {
 
   useEffect(() => {
     fetchHistory();
-  }, [lineFilter]);
+  }, [lineFilter, monthFilter]);
 
   // Calculation logic based on the provided formulas
   const results = useMemo((): OEEResults => {
@@ -344,6 +353,23 @@ export default function App() {
       setIsAnalyzing(false);
     }
   };
+
+  const consolidatedMetrics = useMemo(() => {
+    if (history.length === 0) return { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0 };
+    const sum = history.reduce((acc, curr) => ({
+      oee: acc.oee + curr.oee_score,
+      disponibilidade: acc.disponibilidade + curr.availability,
+      performance: acc.performance + curr.performance,
+      qualidade: acc.qualidade + curr.quality,
+    }), { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0 });
+    
+    return {
+      oee: sum.oee / history.length,
+      disponibilidade: sum.disponibilidade / history.length,
+      performance: sum.performance / history.length,
+      qualidade: sum.qualidade / history.length,
+    };
+  }, [history]);
 
   const chartData = [
     { name: 'TEMPO TOTAL', value: inputs.A, color: '#7e22ce' },
@@ -1110,6 +1136,15 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-3">
                   <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Mês</span>
+                    <input 
+                      type="month"
+                      value={monthFilter}
+                      onChange={(e) => setMonthFilter(e.target.value)}
+                      className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Linha</span>
                     <select 
                       value={lineFilter}
@@ -1171,6 +1206,39 @@ export default function App() {
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
+              </div>
+
+              {/* KPI Cards Consolidados */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                <KPICard 
+                  title="Disponibilidade Média" 
+                  value={consolidatedMetrics.disponibilidade} 
+                  icon={<Clock className="text-blue-400" />} 
+                  color="blue"
+                  description="Média do período filtrado"
+                />
+                <KPICard 
+                  title="Performance Média" 
+                  value={consolidatedMetrics.performance} 
+                  icon={<TrendingUp className="text-orange-400" />} 
+                  color="orange"
+                  description="Média do período filtrado"
+                />
+                <KPICard 
+                  title="Qualidade Média" 
+                  value={consolidatedMetrics.qualidade} 
+                  icon={<CheckCircle2 className="text-emerald-400" />} 
+                  color="emerald"
+                  description="Média do período filtrado"
+                />
+                <KPICard 
+                  title="OEE Global Médio" 
+                  value={consolidatedMetrics.oee} 
+                  icon={<Gauge className="text-indigo-400" />} 
+                  color="indigo"
+                  isMain
+                  description="Média do período filtrado"
+                />
               </div>
 
               {/* Histórico Recente Section */}
