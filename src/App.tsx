@@ -123,6 +123,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inputs' | 'evolution'>('dashboard');
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [history, setHistory] = useState<any[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lineFilter, setLineFilter] = useState<string>('Todas');
@@ -211,6 +212,7 @@ export default function App() {
 
   // Salvar registro no Supabase
   const saveRecord = async () => {
+    setIsSaving(true);
     try {
       const record = {
         machine_name: inputs.line,
@@ -228,9 +230,14 @@ export default function App() {
         .insert([record]);
 
       if (error) throw error;
+      
+      alert('Registro salvo com sucesso no banco de dados!');
       fetchHistory(); // Atualiza a lista após salvar
-    } catch (error) {
+    } catch (error: any) {
       console.error('Erro ao salvar registro:', error);
+      alert('Erro ao salvar registro: ' + error.message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -364,9 +371,6 @@ export default function App() {
       }
 
       setAiAnalysis(text);
-      
-      // Salva no banco após gerar a análise com sucesso
-      saveRecord();
     } catch (error: any) {
       console.error('Erro na análise IA:', error);
       const errorMessage = error.message || 'Erro desconhecido';
@@ -1465,10 +1469,18 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="mt-8 flex justify-end">
+              <div className="mt-8 flex flex-col sm:flex-row justify-end gap-4">
+                <button 
+                  onClick={saveRecord}
+                  disabled={isSaving}
+                  className="bg-emerald-600 text-white px-8 py-4 rounded-2xl font-bold shadow-lg shadow-emerald-500/20 hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {isSaving ? <RefreshCw size={20} className="animate-spin" /> : <Box size={20} />}
+                  {isSaving ? 'Salvando...' : 'Salvar Registro no Banco'}
+                </button>
                 <button 
                   onClick={() => setActiveTab('dashboard')}
-                  className="bg-blue-600 text-white px-10 py-4 rounded-2xl font-bold shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-all flex items-center gap-2 group"
+                  className="bg-blue-600 text-white px-10 py-4 rounded-2xl font-bold shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-all flex items-center justify-center gap-2 group"
                 >
                   Calcular e Ver Dashboard
                   <ChevronRight size={20} className="group-hover:translate-x-1 transition-transform" />
