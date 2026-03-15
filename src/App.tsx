@@ -88,19 +88,10 @@ interface User {
   isAdmin: boolean;
 }
 
-// --- CONFIGURAÇÃO DE ACESSOS PADRÃO (ALTERE AQUI SE PRECISAR) ---
-const DEFAULT_USERS: User[] = [
-  { name: 'Operador 01', email: 'Usuario01@guideway.com.br', password: 'G7w2K9pL', isAdmin: false },
-  { name: 'Operador 02', email: 'Usuario02@guideway.com.br', password: 'X4v8M1nR', isAdmin: false },
-  { name: 'Operador 03', email: 'Usuario03@guideway.com.br', password: 'B5z9T2qW', isAdmin: false },
-  { name: 'Operador 04', email: 'Usuario04@guideway.com.br', password: 'H1k7J4sD', isAdmin: false },
-  { name: 'Operador 05', email: 'Usuario05@guideway.com.br', password: 'Y3m9N6tF', isAdmin: false },
-  { name: 'Operador 06', email: 'Usuario06@guideway.com.br', password: 'C2b8V5xG', isAdmin: false },
-  { name: 'Operador 07', email: 'Usuario07@guideway.com.br', password: 'P9l1K4jH', isAdmin: false },
-  { name: 'Operador 08', email: 'Usuario08@guideway.com.br', password: 'R7f3D6sA', isAdmin: false },
-  { name: 'Operador 09', email: 'Usuario09@guideway.com.br', password: 'W2q8E5rT', isAdmin: false },
-  { name: 'Operador 10', email: 'Usuario10@guideway.com.br', password: 'Z1x7C4vB', isAdmin: false },
-];
+// --- CONFIGURAÇÃO DE ACESSOS PADRÃO ---
+// Agora os usuários são gerenciados via Supabase.
+// O administrador principal será verificado pelo e-mail.
+const MAIN_ADMIN_EMAIL = 'josemarcelolustosa@gmail.com';
 // ---------------------------------------------------------------
 
 export default function App() {
@@ -111,6 +102,7 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
 
   // Initial state based on the provided example image
   const [inputs, setInputs] = useState<OEEInputs>({
@@ -135,6 +127,36 @@ export default function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lineFilter, setLineFilter] = useState<string>('Todas');
   const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
+
+  // Buscar usuários do Supabase (Apenas para ADM)
+  const fetchUsers = async () => {
+    if (!currentUser?.isAdmin) return;
+    setIsLoadingUsers(true);
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .order('name', { ascending: true });
+      
+      if (error) throw error;
+      if (data) setUsers(data.map(u => ({
+        name: u.name,
+        email: u.email,
+        password: u.password,
+        isAdmin: u.is_admin
+      })));
+    } catch (error: any) {
+      console.error('Erro ao buscar usuários:', error);
+    } finally {
+      setIsLoadingUsers(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showAdminPanel) {
+      fetchUsers();
+    }
+  }, [showAdminPanel]);
 
   // Carregar histórico do Supabase
   const fetchHistory = async () => {
@@ -379,49 +401,43 @@ export default function App() {
     { name: 'TEMPO ÚTIL', value: results.X, color: '#0369a1' },
   ];
 
-  // Initialize users and check session
+  // Initialize session
   useEffect(() => {
-    const savedUsers = localStorage.getItem('oee_guide_users');
-    const adminUser: User = {
-      name: 'José Marcelo',
-      email: 'josemarcelolustosa@gmail.com',
-      password: 'papapipi1',
-      isAdmin: true
-    };
-
-    let finalUsers = [adminUser, ...DEFAULT_USERS];
-
-    if (savedUsers) {
-      const parsed = JSON.parse(savedUsers);
-      // Filter out any users that are already in the default or admin list to avoid duplicates
-      const customUsers = parsed.filter((u: User) => 
-        u.email !== adminUser.email && 
-        !DEFAULT_USERS.some(def => def.email === u.email)
-      );
-      finalUsers = [...finalUsers, ...customUsers];
-    }
-    
-    setUsers(finalUsers);
-
     const session = localStorage.getItem('oee_guide_session');
     if (session) {
       setCurrentUser(JSON.parse(session));
     }
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem('oee_guide_users', JSON.stringify(users));
-  }, [users]);
-
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const user = users.find(u => u.email === loginEmail && u.password === loginPassword);
-    if (user) {
+    setLoginError('');
+    
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', loginEmail)
+        .eq('password', loginPassword)
+        .single();
+
+      if (error || !data) {
+        setLoginError('E-mail ou senha incorretos.');
+        return;
+      }
+
+      const user: User = {
+        name: data.name,
+        email: data.email,
+        password: data.password,
+        isAdmin: data.is_admin
+      };
+
       setCurrentUser(user);
       localStorage.setItem('oee_guide_session', JSON.stringify(user));
-      setLoginError('');
-    } else {
-      setLoginError('E-mail ou senha incorretos.');
+    } catch (error) {
+      console.error('Erro no login:', error);
+      setLoginError('Erro ao conectar com o servidor.');
     }
   };
 
@@ -434,35 +450,54 @@ export default function App() {
   const [newUserName, setNewUserName] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
+  const [newUserIsAdmin, setNewUserIsAdmin] = useState(false);
 
-  const handleCreateUser = (e: React.FormEvent) => {
+  const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (users.find(u => u.email === newUserEmail)) {
-      alert('Este e-mail já está cadastrado.');
-      return;
+    try {
+      const { error } = await supabase
+        .from('users')
+        .insert([{
+          name: newUserName,
+          email: newUserEmail,
+          password: newUserPassword,
+          is_admin: newUserIsAdmin
+        }]);
+
+      if (error) throw error;
+
+      alert('Usuário criado com sucesso!');
+      setNewUserName('');
+      setNewUserEmail('');
+      setNewUserPassword('');
+      setNewUserIsAdmin(false);
+      fetchUsers();
+    } catch (error: any) {
+      console.error('Erro ao criar usuário:', error);
+      alert('Erro ao criar usuário: ' + error.message);
     }
-    const newUser: User = {
-      name: newUserName,
-      email: newUserEmail,
-      password: newUserPassword,
-      isAdmin: false
-    };
-    setUsers([...users, newUser]);
-    setNewUserName('');
-    setNewUserEmail('');
-    setNewUserPassword('');
   };
 
-  const handleDeleteUser = (email: string) => {
-    if (email === 'josemarcelolustosa@gmail.com') {
+  const handleDeleteUser = async (email: string) => {
+    if (email === MAIN_ADMIN_EMAIL) {
       alert('O administrador principal não pode ser excluído.');
       return;
     }
-    if (DEFAULT_USERS.some(u => u.email === email)) {
-      alert('Usuários padrão do sistema não podem ser excluídos via interface.');
-      return;
+    
+    if (!confirm(`Deseja realmente excluir o usuário ${email}?`)) return;
+
+    try {
+      const { error } = await supabase
+        .from('users')
+        .delete()
+        .eq('email', email);
+
+      if (error) throw error;
+      fetchUsers();
+    } catch (error: any) {
+      console.error('Erro ao excluir usuário:', error);
+      alert('Erro ao excluir: ' + error.message);
     }
-    setUsers(users.filter(u => u.email !== email));
   };
 
   const handleInputChange = (key: keyof OEEInputs, value: string) => {
@@ -826,19 +861,31 @@ export default function App() {
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Senha</label>
                         <input 
-                          type="password" 
+                          type="text" 
                           value={newUserPassword}
                           onChange={(e) => setNewUserPassword(e.target.value)}
                           className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                          placeholder="Senha do usuário"
+                          placeholder="Defina a senha"
                           required
                         />
+                      </div>
+                      <div className="flex items-center gap-3 px-2">
+                        <input 
+                          type="checkbox" 
+                          id="isAdmin"
+                          checked={newUserIsAdmin}
+                          onChange={(e) => setNewUserIsAdmin(e.target.checked)}
+                          className="w-4 h-4 rounded border-white/10 bg-white/5 text-blue-600 focus:ring-blue-500/50"
+                        />
+                        <label htmlFor="isAdmin" className="text-xs font-bold text-slate-400 cursor-pointer">
+                          Este usuário é Administrador?
+                        </label>
                       </div>
                       <button 
                         type="submit"
                         className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-2xl transition-all"
                       >
-                        CRIAR USUÁRIO
+                        CRIAR USUÁRIO NO BANCO
                       </button>
                     </form>
                   </div>
@@ -846,32 +893,14 @@ export default function App() {
 
               <div className="lg:col-span-2">
                 <div className="bg-zinc-900 border border-white/10 rounded-3xl overflow-hidden">
-                  <div className="px-8 py-5 bg-white/5 border-b border-white/10">
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Contas de Acesso Padrão (Código)</h3>
-                  </div>
-                  <table className="w-full text-left">
-                    <thead>
-                      <tr className="bg-white/5 border-b border-white/10">
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Nome</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">E-mail</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Senha</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/10">
-                      {DEFAULT_USERS.map((user) => (
-                        <tr key={user.email} className="hover:bg-white/5 transition-colors">
-                          <td className="px-8 py-4 text-sm font-bold text-white">{user.name}</td>
-                          <td className="px-8 py-4 text-sm text-slate-400">{user.email}</td>
-                          <td className="px-8 py-4 text-sm font-mono text-emerald-400">{user.password}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="bg-zinc-900 border border-white/10 rounded-3xl overflow-hidden mt-8">
-                  <div className="px-8 py-5 bg-white/5 border-b border-white/10">
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Usuários Personalizados (Navegador)</h3>
+                  <div className="px-8 py-5 bg-white/5 border-b border-white/10 flex justify-between items-center">
+                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Usuários Cadastrados no Supabase</h3>
+                    <button 
+                      onClick={fetchUsers}
+                      className="p-2 text-slate-400 hover:text-white transition-colors"
+                    >
+                      <RefreshCw size={16} className={isLoadingUsers ? 'animate-spin' : ''} />
+                    </button>
                   </div>
                   <table className="w-full text-left">
                     <thead>
@@ -879,19 +908,27 @@ export default function App() {
                         <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Nome</th>
                         <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">E-mail</th>
                         <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Perfil</th>
+                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Senha</th>
                         <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/10">
-                      {users.filter(u => u.email !== 'josemarcelolustosa@gmail.com' && !DEFAULT_USERS.some(d => d.email === u.email)).map((user) => (
+                      {isLoadingUsers ? (
+                        <tr>
+                          <td colSpan={5} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                            Carregando usuários...
+                          </td>
+                        </tr>
+                      ) : users.map((user) => (
                         <tr key={user.email} className="hover:bg-white/5 transition-colors">
                           <td className="px-8 py-5 text-sm font-bold text-white">{user.name}</td>
                           <td className="px-8 py-5 text-sm text-slate-400">{user.email}</td>
                           <td className="px-8 py-5">
-                            <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-zinc-800 text-slate-400">
-                              Operador
+                            <span className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-lg ${user.isAdmin ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-slate-400'}`}>
+                              {user.isAdmin ? 'Admin' : 'Operador'}
                             </span>
                           </td>
+                          <td className="px-8 py-5 text-sm font-mono text-slate-500">{user.password}</td>
                           <td className="px-8 py-5 text-right">
                             <button 
                               onClick={() => handleDeleteUser(user.email)}
@@ -902,10 +939,10 @@ export default function App() {
                           </td>
                         </tr>
                       ))}
-                      {users.filter(u => u.email !== 'josemarcelolustosa@gmail.com' && !DEFAULT_USERS.some(d => d.email === u.email)).length === 0 && (
+                      {!isLoadingUsers && users.length === 0 && (
                         <tr>
-                          <td colSpan={4} className="px-8 py-10 text-center text-slate-500 text-sm italic">
-                            Nenhum usuário personalizado criado.
+                          <td colSpan={5} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                            Nenhum usuário encontrado no banco.
                           </td>
                         </tr>
                       )}
