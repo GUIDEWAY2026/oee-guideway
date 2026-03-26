@@ -192,6 +192,10 @@ export default function App() {
 
   // Excluir registro do Supabase
   const deleteRecord = async (id: string) => {
+    if (!currentUser?.isAdmin) {
+      alert('Apenas administradores podem excluir registros.');
+      return;
+    }
     if (!confirm('Tem certeza que deseja excluir este registro permanentemente?')) return;
     
     try {
@@ -1335,13 +1339,15 @@ export default function App() {
                               </span>
                             </td>
                             <td className="px-8 py-4 text-right">
-                              <button 
-                                onClick={() => deleteRecord(record.id)}
-                                className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                                title="Excluir Registro"
-                              >
-                                <Trash2 size={16} />
-                              </button>
+                              {currentUser.isAdmin && (
+                                <button 
+                                  onClick={() => deleteRecord(record.id)}
+                                  className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                  title="Excluir Registro"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))
