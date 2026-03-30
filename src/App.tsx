@@ -46,6 +46,12 @@ import rehypeRaw from 'rehype-raw';
 import { supabase } from '@/lib/supabase';
 
 // Types for our OEE data
+interface StopEntry {
+  id: string;
+  code: number;
+  duration: number; // minutos
+}
+
 interface OEEInputs {
   date: string; // Data do Relatório
   sku: string; // Nome do Produto (SKU)
@@ -56,10 +62,41 @@ interface OEEInputs {
   D: number; // Velocidade Nominal (gph)
   H: number; // Produção Real (fardos)
   K: number; // Turnos de Produção
-  N: number; // Paradas Programadas (h)
-  Q: number; // Paradas Não Programadas (h)
+  stops: StopEntry[]; // Paradas detalhadas
   U: number; // Perda por Qualidade (garrafas)
 }
+
+const STOP_CODES = [
+  { code: 1, description: 'Problema no RINSER', category: 'NP' },
+  { code: 2, description: 'Problema na ENCHEDORA', category: 'NP' },
+  { code: 3, description: 'Problema no ROSQUEADOR', category: 'NP' },
+  { code: 21, description: 'GARRAFA AMASSADA', category: 'NP' },
+  { code: 22, description: 'TAMPA AGARRADA', category: 'NP' },
+  { code: 23, description: 'REGULAGEM DE TORQUE', category: 'NP' },
+  { code: 24, description: 'REGULAGEM DEVIDO A TROCA DE KIT', category: 'NP' },
+  { code: 31, description: 'SOPRADORA', category: 'NP' },
+  { code: 32, description: 'ROTULADORA', category: 'NP' },
+  { code: 33, description: 'EMPACOTADORA', category: 'NP' },
+  { code: 41, description: 'FALTA DE ÁGUA', category: 'NP' },
+  { code: 42, description: 'FALTA DE ENERGIA', category: 'NP' },
+  { code: 43, description: 'FALTA DE AR COMPRIMIDO', category: 'NP' },
+  { code: 44, description: 'FALTA DE TAMPA', category: 'NP' },
+  { code: 45, description: 'FALTA DE GARRAFA', category: 'NP' },
+  { code: 46, description: 'FALTA DE MATERIAL DE EMBALAGEM', category: 'NP' },
+  { code: 47, description: 'FALTA DE PALETS', category: 'NP' },
+  { code: 101, description: 'REFEIÇÃO', category: 'P' },
+  { code: 102, description: 'CAFÉ', category: 'P' },
+  { code: 103, description: 'CIP', category: 'P' },
+  { code: 104, description: 'MANUTENÇÃO PLANEJADA', category: 'P' },
+  { code: 105, description: 'TROCA DE PRODUTO', category: 'P' },
+  { code: 106, description: 'INICIO DE PRODUÇÃO', category: 'P' },
+  { code: 107, description: 'FINAL DE PRODUÇÃO', category: 'P' },
+  { code: 108, description: 'REUNIÃO', category: 'P' },
+  { code: 109, description: 'TREINAMENTO', category: 'P' },
+  { code: 110, description: 'TESTES DE EQUIPAMENTOS / MATERIAIS', category: 'P' },
+  { code: 111, description: 'TROCA DE KIT', category: 'P' },
+  { code: 500, description: 'OUTROS', category: 'NP' },
+];
 
 interface OEEResults {
   F: number; // Velocidade de Projeto
@@ -74,6 +111,8 @@ interface OEEResults {
   T: number; // Tempo Líquido
   V: number; // Tempo Qualidade
   X: number; // Tempo Útil
+  N: number; // Paradas Programadas (h)
+  Q: number; // Paradas Não Programadas (h)
   disponibilidade: number;
   performance: number;
   qualidade: number;
@@ -115,8 +154,7 @@ export default function App() {
     D: 22000,
     H: 10000,
     K: 2,
-    N: 2.5,
-    Q: 1.5,
+    stops: [],
     U: 2500
   });
 
@@ -226,7 +264,8 @@ export default function App() {
         quality: results.qualidade,
         oee_score: results.oee,
         shift: `Turnos: ${inputs.K}`,
-        notes: `Produção Real: ${inputs.H}`
+        notes: `Produção Real: ${inputs.H}`,
+        downtime_data: JSON.stringify(inputs.stops) // Novo campo para paradas detalhadas
       };
 
       const { error } = await supabase
@@ -251,7 +290,18 @@ export default function App() {
 
   // Calculation logic based on the provided formulas
   const results = useMemo((): OEEResults => {
-    const { A, B, C, D, H, K, N, Q, U } = inputs;
+    const { A, B, C, D, H, K, U, stops = [] } = inputs;
+
+    // Calcular N e Q a partir das paradas
+    const N = stops.filter(s => {
+      const config = STOP_CODES.find(c => c.code === Number(s.code));
+      return config?.category === 'P';
+    }).reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0) / 60;
+
+    const Q = stops.filter(s => {
+      const config = STOP_CODES.find(c => c.code === Number(s.code));
+      return config?.category === 'NP';
+    }).reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0) / 60;
 
     // F = D * (B/100)
     const F = D * (B / 100);
@@ -295,7 +345,7 @@ export default function App() {
     const oee = disponibilidade * performance * qualidade;
 
     return {
-      F, G, I, L, M, O, P, R, S, T, V, X,
+      F, G, I, L, M, O, P, R, S, T, V, X, N, Q,
       disponibilidade: Math.max(0, disponibilidade * 100),
       performance: Math.max(0, performance * 100),
       qualidade: Math.max(0, qualidade * 100),
@@ -337,7 +387,7 @@ export default function App() {
       DADOS DE PRODUÇÃO:
       - Produção Real: ${inputs.H} fardos
       - Produção Teórica: ${results.G.toFixed(1)} fardos
-      - Paradas Não Programadas: ${inputs.Q}h
+      - Paradas Não Programadas: ${results.Q.toFixed(1)}h
       - Perda por Qualidade: ${inputs.U} garrafas
       - Redução de Velocidade (Perda de Performance): ${results.S.toFixed(1)}h
       
@@ -385,21 +435,68 @@ export default function App() {
   };
 
   const consolidatedMetrics = useMemo(() => {
-    if (history.length === 0) return { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0 };
+    if (history.length === 0) return { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0, paretoData: [] };
+    
     const sum = history.reduce((acc, curr) => ({
       oee: acc.oee + curr.oee_score,
       disponibilidade: acc.disponibilidade + curr.availability,
       performance: acc.performance + curr.performance,
       qualidade: acc.qualidade + curr.quality,
     }), { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0 });
+
+    // Consolidar dados para o Pareto
+    const stopsMap: { [key: number]: number } = {};
+    history.forEach(record => {
+      if (record.downtime_data) {
+        try {
+          const stops: StopEntry[] = JSON.parse(record.downtime_data);
+          stops.forEach(stop => {
+            stopsMap[stop.code] = (stopsMap[stop.code] || 0) + stop.duration;
+          });
+        } catch (e) {
+          console.error("Erro ao processar downtime_data", e);
+        }
+      }
+    });
+
+    const paretoData = Object.entries(stopsMap)
+      .map(([code, duration]) => {
+        const config = STOP_CODES.find(c => c.code === parseInt(code));
+        return {
+          name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
+          duration,
+          category: config?.category || 'NP'
+        };
+      })
+      .sort((a, b) => b.duration - a.duration);
     
     return {
       oee: sum.oee / history.length,
       disponibilidade: sum.disponibilidade / history.length,
       performance: sum.performance / history.length,
       qualidade: sum.qualidade / history.length,
+      paretoData
     };
   }, [history]);
+
+  const currentParetoData = useMemo(() => {
+    const stopsMap: { [key: number]: number } = {};
+    inputs.stops.forEach(stop => {
+      const code = Number(stop.code);
+      stopsMap[code] = (stopsMap[code] || 0) + (Number(stop.duration) || 0);
+    });
+
+    return Object.entries(stopsMap)
+      .map(([code, duration]) => {
+        const config = STOP_CODES.find(c => c.code === Number(code));
+        return {
+          name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
+          duration,
+          category: config?.category || 'NP'
+        };
+      })
+      .sort((a, b) => b.duration - a.duration);
+  }, [inputs.stops]);
 
   const chartData = [
     { name: 'TEMPO TOTAL', value: inputs.A, color: '#7e22ce' },
@@ -652,7 +749,7 @@ export default function App() {
                   <tr><td>Produção Real</td><td>${formatNumber(inputs.H)}</td><td>fardos</td></tr>
                   <tr><td>Produção Teórica</td><td>${formatNumber(results.G)}</td><td>fardos</td></tr>
                   <tr><td>Velocidade de Projeto</td><td>${formatNumber(results.F)}</td><td>gph</td></tr>
-                  <tr><td>Paradas Não Programadas</td><td>${inputs.Q}</td><td>h</td></tr>
+                  <tr><td>Paradas Não Programadas</td><td>${formatNumber(results.Q)}</td><td>h</td></tr>
                   <tr><td>Perda por Qualidade</td><td>${inputs.U}</td><td>garrafas</td></tr>
               </tbody>
           </table>
@@ -1047,13 +1144,13 @@ export default function App() {
                       Decomposição de Tempos (h)
                     </h3>
                   </div>
-                  <div className="flex-1 min-h-[400px]">
+                  <div className="flex-1 min-h-[350px]">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart
                         layout="vertical"
                         data={chartData}
                         margin={{ top: 5, right: 40, left: 40, bottom: 5 }}
-                        barSize={50}
+                        barSize={40}
                       >
                         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
                         <XAxis type="number" hide />
@@ -1082,8 +1179,58 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Secondary Stats */}
-                <div className="space-y-6">
+                {/* Pareto do Dia */}
+                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                  <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-6">
+                    <AlertTriangle size={20} className="text-red-400" />
+                    Pareto do Dia (min)
+                  </h3>
+                  <div className="flex-1 min-h-[350px]">
+                    {currentParetoData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart 
+                          data={currentParetoData}
+                          layout="vertical"
+                          margin={{ left: 10, right: 30 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                          <XAxis type="number" hide />
+                          <YAxis 
+                            dataKey="name" 
+                            type="category" 
+                            width={120} 
+                            tick={{ fontSize: 9, fill: '#94a3b8' }}
+                            axisLine={false}
+                            tickLine={false}
+                            tickFormatter={(val) => val.length > 20 ? val.substring(0, 17) + '...' : val}
+                          />
+                          <Tooltip 
+                            contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                            formatter={(value: number) => [value + ' min', 'Duração']}
+                          />
+                          <Bar dataKey="duration" radius={[0, 4, 4, 0]}>
+                            {currentParetoData.map((entry, index) => (
+                              <Cell 
+                                key={`cell-${index}`} 
+                                fill={entry.category === 'P' ? '#3b82f6' : '#ef4444'} 
+                              />
+                            ))}
+                            <LabelList dataKey="duration" position="right" style={{ fill: '#cbd5e1', fontSize: 9 }} />
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="flex-1 flex flex-col items-center justify-center text-slate-500 text-center px-4">
+                        <Clock size={40} className="opacity-20 mb-4" />
+                        <p className="text-xs">Nenhuma parada registrada para hoje.</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Secondary Stats */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                   <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
                     <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Produção & Velocidade</h3>
                     <div className="space-y-4">
@@ -1098,7 +1245,7 @@ export default function App() {
                     <div className="space-y-4">
                       <StatRow label="Redução Velocidade" value={formatNumber(results.S)} unit="h" color="text-orange-400" />
                       <StatRow label="Perda Qualidade" value={formatNumber(results.V)} unit="h" color="text-red-400" />
-                      <StatRow label="Paradas Não Prog." value={formatNumber(inputs.Q)} unit="h" color="text-red-400" />
+                      <StatRow label="Paradas Não Prog." value={formatNumber(results.Q)} unit="h" color="text-red-400" />
                     </div>
                   </div>
 
@@ -1120,60 +1267,59 @@ export default function App() {
                     <Activity className="absolute -right-4 -bottom-4 opacity-[0.03]" size={120} />
                   </div>
                 </div>
-              </div>
 
-              {/* AI Analysis Section */}
-              <AnimatePresence>
-                {(aiAnalysis || isAnalyzing) && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 20 }}
-                    className="bg-zinc-900 rounded-3xl border border-indigo-500/30 shadow-2xl shadow-indigo-500/5 overflow-hidden"
-                  >
-                    <div className="bg-indigo-600/10 px-8 py-4 border-b border-indigo-500/20 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="p-2 bg-indigo-600 rounded-lg">
-                          <Sparkles size={18} className="text-white" />
+                {/* AI Analysis Section */}
+                <AnimatePresence>
+                  {(aiAnalysis || isAnalyzing) && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 20 }}
+                      className="bg-zinc-900 rounded-3xl border border-indigo-500/30 shadow-2xl shadow-indigo-500/5 overflow-hidden"
+                    >
+                      <div className="bg-indigo-600/10 px-8 py-4 border-b border-indigo-500/20 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 bg-indigo-600 rounded-lg">
+                            <Sparkles size={18} className="text-white" />
+                          </div>
+                          <h3 className="font-bold text-indigo-100">Análise Crítica Guideway AI</h3>
                         </div>
-                        <h3 className="font-bold text-indigo-100">Análise Crítica Guideway AI</h3>
+                        {isAnalyzing && (
+                          <div className="flex items-center gap-2 text-indigo-300 text-xs font-bold animate-pulse">
+                            Processando dados...
+                          </div>
+                        )}
                       </div>
-                      {isAnalyzing && (
-                        <div className="flex items-center gap-2 text-indigo-300 text-xs font-bold animate-pulse">
-                          Processando dados...
-                        </div>
-                      )}
-                    </div>
-                    <div className="p-8">
-                      {isAnalyzing ? (
-                        <div className="space-y-4">
-                          <div className="h-4 bg-white/5 rounded w-3/4 animate-pulse" />
-                          <div className="h-4 bg-white/5 rounded w-full animate-pulse" />
-                          <div className="h-4 bg-white/5 rounded w-5/6 animate-pulse" />
-                        </div>
-                      ) : (
-                        <div className="prose prose-invert prose-sm max-w-none 
-                          prose-headings:text-emerald-400 prose-headings:font-bold prose-headings:mt-6 prose-headings:mb-3 
-                          prose-strong:text-white prose-strong:font-bold 
-                          prose-p:text-slate-200 prose-p:leading-relaxed prose-p:mb-4
-                          prose-hr:border-white/10 prose-hr:my-6
-                          prose-table:text-xs prose-th:text-emerald-400 prose-td:text-slate-300">
-                          <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{aiAnalysis}</Markdown>
-                        </div>
-                      )}
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </motion.div>
-          ) : activeTab === 'evolution' ? (
-            <motion.div 
-              key="evolution"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="max-w-6xl mx-auto space-y-8"
-            >
+                      <div className="p-8">
+                        {isAnalyzing ? (
+                          <div className="space-y-4">
+                            <div className="h-4 bg-white/5 rounded w-3/4 animate-pulse" />
+                            <div className="h-4 bg-white/5 rounded w-full animate-pulse" />
+                            <div className="h-4 bg-white/5 rounded w-5/6 animate-pulse" />
+                          </div>
+                        ) : (
+                          <div className="prose prose-invert prose-sm max-w-none 
+                            prose-headings:text-emerald-400 prose-headings:font-bold prose-headings:mt-6 prose-headings:mb-3 
+                            prose-strong:text-white prose-strong:font-bold 
+                            prose-p:text-slate-200 prose-p:leading-relaxed prose-p:mb-4
+                            prose-hr:border-white/10 prose-hr:my-6
+                            prose-table:text-xs prose-th:text-emerald-400 prose-td:text-slate-300">
+                            <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{aiAnalysis}</Markdown>
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+            ) : activeTab === 'evolution' ? (
+              <motion.div 
+                key="evolution"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="max-w-6xl mx-auto space-y-8"
+              >
               <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                 <div>
                   <h2 className="text-3xl font-bold tracking-tight text-white">Evolução Histórica</h2>
@@ -1250,6 +1396,57 @@ export default function App() {
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Gráfico de Pareto de Paradas */}
+              <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
+                <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
+                  <AlertTriangle size={20} className="text-red-400" />
+                  Pareto de Paradas (Minutos Acumulados)
+                </h3>
+                <div className="h-[400px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart 
+                      data={consolidatedMetrics.paretoData}
+                      layout="vertical"
+                      margin={{ left: 40, right: 40 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                      <XAxis type="number" hide />
+                      <YAxis 
+                        dataKey="name" 
+                        type="category" 
+                        width={250} 
+                        tick={{ fontSize: 10, fill: '#94a3b8' }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                        formatter={(value: number) => [value + ' min', 'Duração']}
+                      />
+                      <Bar dataKey="duration" radius={[0, 4, 4, 0]}>
+                        {consolidatedMetrics.paretoData.map((entry: any, index: number) => (
+                          <Cell 
+                            key={`cell-${index}`} 
+                            fill={entry.category === 'P' ? '#3b82f6' : '#ef4444'} 
+                          />
+                        ))}
+                        <LabelList dataKey="duration" position="right" style={{ fill: '#cbd5e1', fontSize: 10 }} />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-4 flex justify-center gap-6">
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 bg-red-500 rounded-sm" />
+                    <span className="text-[10px] text-slate-400 uppercase font-bold">Não Programadas</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 bg-blue-500 rounded-sm" />
+                    <span className="text-[10px] text-slate-400 uppercase font-bold">Programadas</span>
+                  </div>
                 </div>
               </div>
 
@@ -1363,7 +1560,7 @@ export default function App() {
                 </div>
               </div>
             </motion.div>
-          ) : (
+          ) : activeTab === 'inputs' ? (
             <motion.div 
               key="inputs"
               initial={{ opacity: 0, x: 20 }}
@@ -1456,20 +1653,158 @@ export default function App() {
                     />
                   </InputGroup>
 
-                  <InputGroup title="Paradas Registradas" fullWidth>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                      <InputField 
-                        label="N - Paradas Programadas (h)" 
-                        value={inputs.N} 
-                        onChange={(v) => handleInputChange('N', v)} 
-                        icon={<Clock size={16} />}
-                      />
-                      <InputField 
-                        label="Q - Paradas Não Programadas (h)" 
-                        value={inputs.Q} 
-                        onChange={(v) => handleInputChange('Q', v)} 
-                        icon={<AlertTriangle size={16} />}
-                      />
+                  <InputGroup title="Registro de Paradas (Conforme Formulário)" fullWidth>
+                    <div className="space-y-6">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs text-slate-400">Insira cada parada individualmente com seu respectivo código.</p>
+                        {inputs.stops.length > 0 && (
+                          <button 
+                            onClick={() => setInputs(prev => ({ ...prev, stops: [] }))}
+                            className="text-[10px] font-bold text-red-400 uppercase tracking-widest hover:text-red-300 transition-colors flex items-center gap-1"
+                          >
+                            <Trash2 size={12} />
+                            Limpar Tudo
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Gráfico de Pareto em Tempo Real nos Parâmetros */}
+                      {currentParetoData.length > 0 && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="bg-black/40 p-6 rounded-2xl border border-white/5"
+                        >
+                          <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+                            <BarChart3 size={14} className="text-indigo-400" />
+                            Pareto de Paradas do Relatório (minutos)
+                          </h4>
+                          <div className="h-[200px] w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <BarChart data={currentParetoData} layout="vertical" margin={{ right: 30 }}>
+                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                                <XAxis type="number" hide />
+                                <YAxis 
+                                  dataKey="name" 
+                                  type="category" 
+                                  width={120} 
+                                  tick={{ fontSize: 8, fill: '#94a3b8' }}
+                                  axisLine={false}
+                                  tickLine={false}
+                                  tickFormatter={(val) => val.length > 20 ? val.substring(0, 17) + '...' : val}
+                                />
+                                <Tooltip 
+                                  contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                                  formatter={(value: number) => [value + ' min', 'Duração']}
+                                />
+                                <Bar dataKey="duration" radius={[0, 4, 4, 0]}>
+                                  {currentParetoData.map((entry, index) => (
+                                    <Cell 
+                                      key={`cell-${index}`} 
+                                      fill={entry.category === 'P' ? '#3b82f6' : '#ef4444'} 
+                                    />
+                                  ))}
+                                  <LabelList dataKey="duration" position="right" style={{ fill: '#cbd5e1', fontSize: 8 }} />
+                                </Bar>
+                              </BarChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </motion.div>
+                      )}
+
+                      <div className="space-y-3">
+                        {inputs.stops.map((stop, index) => {
+                          const stopConfig = STOP_CODES.find(c => c.code === stop.code);
+                          return (
+                            <motion.div 
+                              initial={{ opacity: 0, x: -10 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              key={stop.id} 
+                              className="flex items-center gap-4 bg-black/40 p-4 rounded-2xl border border-white/5 group hover:border-white/10 transition-all"
+                            >
+                              <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
+                                {index + 1}
+                              </div>
+                              <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
+                                  <select 
+                                    value={stop.code}
+                                    onChange={(e) => {
+                                      const newStops = [...inputs.stops];
+                                      newStops[index].code = parseInt(e.target.value);
+                                      setInputs(prev => ({ ...prev, stops: newStops }));
+                                    }}
+                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                  >
+                                    {STOP_CODES.map(c => (
+                                      <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Duração (Minutos)</label>
+                                  <div className="relative">
+                                    <input 
+                                      type="number"
+                                      value={stop.duration}
+                                      onChange={(e) => {
+                                        const newStops = [...inputs.stops];
+                                        newStops[index].duration = parseFloat(e.target.value) || 0;
+                                        setInputs(prev => ({ ...prev, stops: newStops }));
+                                      }}
+                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all pr-12"
+                                      placeholder="0"
+                                    />
+                                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-500 uppercase">min</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <button 
+                                onClick={() => {
+                                  const newStops = inputs.stops.filter((_, i) => i !== index);
+                                  setInputs(prev => ({ ...prev, stops: newStops }));
+                                }}
+                                className="p-2 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg"
+                              >
+                                <Trash2 size={18} />
+                              </button>
+                            </motion.div>
+                          );
+                        })}
+                      </div>
+                      
+                      <button 
+                        onClick={() => {
+                          const newStop: StopEntry = {
+                            id: crypto.randomUUID(),
+                            code: 1,
+                            duration: 0
+                          };
+                          setInputs(prev => ({ ...prev, stops: [...prev.stops, newStop] }));
+                        }}
+                        className="w-full py-6 border-2 border-dashed border-white/10 rounded-2xl text-slate-500 hover:text-white hover:border-white/20 hover:bg-white/5 transition-all flex items-center justify-center gap-3 font-bold text-sm"
+                      >
+                        <RefreshCw size={18} className="text-blue-500" />
+                        Adicionar Parada do Formulário
+                      </button>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-6 border-t border-white/5">
+                        <div className="bg-blue-500/5 p-5 rounded-2xl border border-blue-500/10 flex justify-between items-center">
+                          <div>
+                            <p className="text-[10px] font-bold text-blue-400 uppercase mb-1 tracking-widest">Soma Paradas Programadas (N)</p>
+                            <p className="text-2xl font-black text-white">{results.N.toFixed(2)}<span className="text-xs ml-1 text-slate-500">h</span></p>
+                          </div>
+                          <Clock size={24} className="text-blue-500/30" />
+                        </div>
+                        <div className="bg-red-500/5 p-5 rounded-2xl border border-red-500/10 flex justify-between items-center">
+                          <div>
+                            <p className="text-[10px] font-bold text-red-400 uppercase mb-1 tracking-widest">Soma Paradas Não Programadas (Q)</p>
+                            <p className="text-2xl font-black text-white">{results.Q.toFixed(2)}<span className="text-xs ml-1 text-slate-500">h</span></p>
+                          </div>
+                          <AlertTriangle size={24} className="text-red-500/30" />
+                        </div>
+                      </div>
                     </div>
                   </InputGroup>
                 </div>
@@ -1493,7 +1828,7 @@ export default function App() {
                 </button>
               </div>
             </motion.div>
-          )}
+          ) : null}
         </AnimatePresence>
       </main>
     </div>
