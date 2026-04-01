@@ -38,12 +38,52 @@ import {
   Box,
   Cpu
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import { supabase } from '@/lib/supabase';
+
+// Error Boundary Component
+class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("Uncaught error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-black flex items-center justify-center p-8 text-white font-sans">
+          <div className="max-w-md w-full bg-zinc-900 border border-red-500/20 p-8 rounded-3xl shadow-2xl">
+            <h1 className="text-2xl font-bold text-red-500 mb-4">Algo deu errado</h1>
+            <p className="text-slate-400 mb-6 text-sm">Ocorreu um erro inesperado na aplicação. Por favor, tente recarregar a página.</p>
+            <div className="bg-black/50 p-4 rounded-xl border border-white/5 mb-6 overflow-auto max-h-40">
+              <code className="text-[10px] text-red-400 font-mono">{this.state.error?.toString()}</code>
+            </div>
+            <button 
+              onClick={() => window.location.reload()}
+              className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-2xl transition-all"
+            >
+              Recarregar Página
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 // Types for our OEE data
 interface StopEntry {
@@ -168,6 +208,28 @@ export default function App() {
   const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
 
   // Buscar usuários do Supabase (Apenas para ADM)
+  const ensureAdminExists = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('email')
+        .eq('email', MAIN_ADMIN_EMAIL)
+        .single();
+      
+      if (error && error.code === 'PGRST116') { // PGRST116 = Not Found
+        console.log('Criando usuário administrador inicial...');
+        await supabase.from('users').insert([{
+          name: 'Administrador Guideway',
+          email: MAIN_ADMIN_EMAIL,
+          password: 'admin', // Senha padrão inicial
+          is_admin: true
+        }]);
+      }
+    } catch (err) {
+      console.error('Erro ao verificar administrador:', err);
+    }
+  };
+
   const fetchUsers = async () => {
     if (!currentUser?.isAdmin) return;
     setIsLoadingUsers(true);
@@ -435,7 +497,7 @@ export default function App() {
   };
 
   const consolidatedMetrics = useMemo(() => {
-    if (history.length === 0) return { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0, paretoData: [] };
+    if (history.length === 0) return { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0, paretoNP: [], paretoP: [] };
     
     const sum = history.reduce((acc, curr) => ({
       oee: acc.oee + curr.oee_score,
@@ -459,7 +521,7 @@ export default function App() {
       }
     });
 
-    const paretoData = Object.entries(stopsMap)
+    const allPareto = Object.entries(stopsMap)
       .map(([code, duration]) => {
         const config = STOP_CODES.find(c => c.code === parseInt(code));
         return {
@@ -470,12 +532,16 @@ export default function App() {
       })
       .sort((a, b) => b.duration - a.duration);
     
+    const paretoNP = allPareto.filter(item => item.category === 'NP');
+    const paretoP = allPareto.filter(item => item.category === 'P');
+    
     return {
       oee: sum.oee / history.length,
       disponibilidade: sum.disponibilidade / history.length,
       performance: sum.performance / history.length,
       qualidade: sum.qualidade / history.length,
-      paretoData
+      paretoNP,
+      paretoP
     };
   }, [history]);
 
@@ -486,7 +552,7 @@ export default function App() {
       stopsMap[code] = (stopsMap[code] || 0) + (Number(stop.duration) || 0);
     });
 
-    return Object.entries(stopsMap)
+    const allPareto = Object.entries(stopsMap)
       .map(([code, duration]) => {
         const config = STOP_CODES.find(c => c.code === Number(code));
         return {
@@ -496,6 +562,11 @@ export default function App() {
         };
       })
       .sort((a, b) => b.duration - a.duration);
+
+    return {
+      np: allPareto.filter(item => item.category === 'NP'),
+      p: allPareto.filter(item => item.category === 'P')
+    };
   }, [inputs.stops]);
 
   const chartData = [
@@ -508,6 +579,7 @@ export default function App() {
 
   // Initialize session
   useEffect(() => {
+    ensureAdminExists();
     const session = localStorage.getItem('oee_guide_session');
     if (session) {
       setCurrentUser(JSON.parse(session));
@@ -847,7 +919,8 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-white font-sans flex flex-col md:flex-row">
+    <ErrorBoundary>
+      <div className="min-h-screen bg-black text-white font-sans flex flex-col md:flex-row">
       {/* Sidebar for Desktop / Bottom Nav for Mobile */}
       <aside className="w-full md:w-80 bg-zinc-900 border-r border-white/10 flex flex-col shrink-0 z-20">
         <div className="p-8 border-b border-white/5 flex flex-col items-center text-center gap-4">
@@ -1135,22 +1208,22 @@ export default function App() {
               </div>
 
               {/* Charts and Details Section */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              <div className="grid grid-cols-1 gap-8">
                 {/* Chart Card */}
-                <div className="lg:col-span-2 bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
                   <div className="flex items-center justify-between mb-8">
                     <h3 className="font-bold text-lg flex items-center gap-2 text-white">
                       <Activity size={20} className="text-blue-400" />
                       Decomposição de Tempos (h)
                     </h3>
                   </div>
-                  <div className="flex-1 min-h-[350px]">
+                  <div className="flex-1 min-h-[400px]">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart
                         layout="vertical"
                         data={chartData}
-                        margin={{ top: 5, right: 40, left: 40, bottom: 5 }}
-                        barSize={40}
+                        margin={{ top: 5, right: 60, left: 40, bottom: 5 }}
+                        barSize={50}
                       >
                         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
                         <XAxis type="number" hide />
@@ -1158,7 +1231,7 @@ export default function App() {
                           dataKey="name" 
                           type="category" 
                           width={150} 
-                          tick={{ fontSize: 10, fontWeight: 600, fill: '#94a3b8' }}
+                          tick={{ fontSize: 12, fontWeight: 600, fill: '#94a3b8' }}
                           axisLine={false}
                           tickLine={false}
                         />
@@ -1172,59 +1245,10 @@ export default function App() {
                           {chartData.map((entry, index) => (
                             <Cell key={`cell-${index}`} fill={entry.color} />
                           ))}
-                          <LabelList dataKey="value" position="right" formatter={(v: number) => v.toFixed(1)} style={{ fill: '#cbd5e1', fontSize: 13, fontWeight: 700 }} />
+                          <LabelList dataKey="value" position="right" formatter={(v: number) => v.toFixed(1)} style={{ fill: '#cbd5e1', fontSize: 14, fontWeight: 700 }} />
                         </Bar>
                       </BarChart>
                     </ResponsiveContainer>
-                  </div>
-                </div>
-
-                {/* Pareto do Dia */}
-                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
-                  <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-6">
-                    <AlertTriangle size={20} className="text-red-400" />
-                    Pareto do Dia (min)
-                  </h3>
-                  <div className="flex-1 min-h-[350px]">
-                    {currentParetoData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart 
-                          data={currentParetoData}
-                          layout="vertical"
-                          margin={{ left: 10, right: 30 }}
-                        >
-                          <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
-                          <XAxis type="number" hide />
-                          <YAxis 
-                            dataKey="name" 
-                            type="category" 
-                            width={120} 
-                            tick={{ fontSize: 9, fill: '#94a3b8' }}
-                            axisLine={false}
-                            tickLine={false}
-                            tickFormatter={(val) => val.length > 20 ? val.substring(0, 17) + '...' : val}
-                          />
-                          <Tooltip 
-                            contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                            formatter={(value: number) => [value + ' min', 'Duração']}
-                          />
-                          <Bar dataKey="duration" radius={[0, 4, 4, 0]}>
-                            {currentParetoData.map((entry, index) => (
-                              <Cell 
-                                key={`cell-${index}`} 
-                                fill={entry.category === 'P' ? '#3b82f6' : '#ef4444'} 
-                              />
-                            ))}
-                            <LabelList dataKey="duration" position="right" style={{ fill: '#cbd5e1', fontSize: 9 }} />
-                          </Bar>
-                        </BarChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="flex-1 flex flex-col items-center justify-center text-slate-500 text-center px-4">
-                        <Clock size={40} className="opacity-20 mb-4" />
-                        <p className="text-xs">Nenhuma parada registrada para hoje.</p>
-                      </div>
-                    )}
                   </div>
                 </div>
               </div>
@@ -1400,52 +1424,80 @@ export default function App() {
               </div>
 
               {/* Gráfico de Pareto de Paradas */}
-              <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
-                <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
-                  <AlertTriangle size={20} className="text-red-400" />
-                  Pareto de Paradas (Minutos Acumulados)
-                </h3>
-                <div className="h-[400px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart 
-                      data={consolidatedMetrics.paretoData}
-                      layout="vertical"
-                      margin={{ left: 40, right: 40 }}
-                    >
-                      <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
-                      <XAxis type="number" hide />
-                      <YAxis 
-                        dataKey="name" 
-                        type="category" 
-                        width={250} 
-                        tick={{ fontSize: 10, fill: '#94a3b8' }}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <Tooltip 
-                        contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                        formatter={(value: number) => [value + ' min', 'Duração']}
-                      />
-                      <Bar dataKey="duration" radius={[0, 4, 4, 0]}>
-                        {consolidatedMetrics.paretoData.map((entry: any, index: number) => (
-                          <Cell 
-                            key={`cell-${index}`} 
-                            fill={entry.category === 'P' ? '#3b82f6' : '#ef4444'} 
-                          />
-                        ))}
-                        <LabelList dataKey="duration" position="right" style={{ fill: '#cbd5e1', fontSize: 10 }} />
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="mt-4 flex justify-center gap-6">
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 bg-red-500 rounded-sm" />
-                    <span className="text-[10px] text-slate-400 uppercase font-bold">Não Programadas</span>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                  <h3 className="font-bold text-lg flex items-center gap-2 text-red-400 mb-8">
+                    <AlertTriangle size={20} />
+                    Pareto Não Programadas (Minutos Acumulados)
+                  </h3>
+                  <div className="h-[400px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart 
+                        data={consolidatedMetrics.paretoNP}
+                        margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                        <XAxis 
+                          dataKey="name" 
+                          tick={{ fontSize: 10, fill: '#94a3b8' }}
+                          interval={0}
+                          angle={-45}
+                          textAnchor="end"
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis 
+                          tick={{ fontSize: 10, fill: '#94a3b8' }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                          formatter={(value: number) => [value + ' min', 'Duração']}
+                        />
+                        <Bar dataKey="duration" fill="#ef4444" radius={[4, 4, 0, 0]}>
+                          <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 bg-blue-500 rounded-sm" />
-                    <span className="text-[10px] text-slate-400 uppercase font-bold">Programadas</span>
+                </div>
+
+                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                  <h3 className="font-bold text-lg flex items-center gap-2 text-blue-400 mb-8">
+                    <Clock size={20} />
+                    Pareto Programadas (Minutos Acumulados)
+                  </h3>
+                  <div className="h-[400px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart 
+                        data={consolidatedMetrics.paretoP}
+                        margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                        <XAxis 
+                          dataKey="name" 
+                          tick={{ fontSize: 10, fill: '#94a3b8' }}
+                          interval={0}
+                          angle={-45}
+                          textAnchor="end"
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis 
+                          tick={{ fontSize: 10, fill: '#94a3b8' }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                          formatter={(value: number) => [value + ' min', 'Duração']}
+                        />
+                        <Bar dataKey="duration" fill="#3b82f6" radius={[4, 4, 0, 0]}>
+                          <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
                   </div>
                 </div>
               </div>
@@ -1668,50 +1720,6 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Gráfico de Pareto em Tempo Real nos Parâmetros */}
-                      {currentParetoData.length > 0 && (
-                        <motion.div 
-                          initial={{ opacity: 0, y: 10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          className="bg-black/40 p-6 rounded-2xl border border-white/5"
-                        >
-                          <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                            <BarChart3 size={14} className="text-indigo-400" />
-                            Pareto de Paradas do Relatório (minutos)
-                          </h4>
-                          <div className="h-[200px] w-full">
-                            <ResponsiveContainer width="100%" height="100%">
-                              <BarChart data={currentParetoData} layout="vertical" margin={{ right: 30 }}>
-                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
-                                <XAxis type="number" hide />
-                                <YAxis 
-                                  dataKey="name" 
-                                  type="category" 
-                                  width={120} 
-                                  tick={{ fontSize: 8, fill: '#94a3b8' }}
-                                  axisLine={false}
-                                  tickLine={false}
-                                  tickFormatter={(val) => val.length > 20 ? val.substring(0, 17) + '...' : val}
-                                />
-                                <Tooltip 
-                                  contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                                  formatter={(value: number) => [value + ' min', 'Duração']}
-                                />
-                                <Bar dataKey="duration" radius={[0, 4, 4, 0]}>
-                                  {currentParetoData.map((entry, index) => (
-                                    <Cell 
-                                      key={`cell-${index}`} 
-                                      fill={entry.category === 'P' ? '#3b82f6' : '#ef4444'} 
-                                    />
-                                  ))}
-                                  <LabelList dataKey="duration" position="right" style={{ fill: '#cbd5e1', fontSize: 8 }} />
-                                </Bar>
-                              </BarChart>
-                            </ResponsiveContainer>
-                          </div>
-                        </motion.div>
-                      )}
-
                       <div className="space-y-3">
                         {inputs.stops.map((stop, index) => {
                           const stopConfig = STOP_CODES.find(c => c.code === stop.code);
@@ -1832,6 +1840,7 @@ export default function App() {
         </AnimatePresence>
       </main>
     </div>
+    </ErrorBoundary>
   );
 }
 
