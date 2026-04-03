@@ -36,7 +36,9 @@ import {
   BarChart3,
   Calendar,
   Box,
-  Cpu
+  Cpu,
+  Search,
+  ArrowRight
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
@@ -199,6 +201,10 @@ export default function App() {
   });
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inputs' | 'evolution'>('dashboard');
+  const [dashboardDate, setDashboardDate] = useState(new Date().toISOString().split('T')[0]);
+  const [dashboardLine, setDashboardLine] = useState('Linha 01');
+  const [dashboardRecord, setDashboardRecord] = useState<any>(null);
+  const [isFetchingDashboard, setIsFetchingDashboard] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -206,6 +212,35 @@ export default function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lineFilter, setLineFilter] = useState<string>('Todas');
   const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
+
+  // Buscar o último registro geral para inicializar o Dashboard
+  const fetchLatestRecord = async () => {
+    if (!currentUser) return;
+    setIsFetchingDashboard(true);
+    try {
+      const { data, error } = await supabase
+        .from('oee_records')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+      
+      if (data && data.length > 0) {
+        const latest = data[0];
+        // Extrai apenas a parte da data YYYY-MM-DD
+        const recordDate = new Date(latest.created_at).toISOString().split('T')[0];
+        
+        setDashboardDate(recordDate);
+        setDashboardLine(latest.machine_name);
+        setDashboardRecord(latest);
+      }
+    } catch (err) {
+      console.error('Erro ao buscar último registro para o dashboard:', err);
+    } finally {
+      setIsFetchingDashboard(false);
+    }
+  };
 
   // Buscar usuários do Supabase (Apenas para ADM)
   const ensureAdminExists = async () => {
@@ -327,7 +362,8 @@ export default function App() {
         oee_score: results.oee,
         shift: `Turnos: ${inputs.K}`,
         notes: `Produção Real: ${inputs.H}`,
-        downtime_data: JSON.stringify(inputs.stops) // Novo campo para paradas detalhadas
+        downtime_data: JSON.stringify(inputs.stops),
+        raw_data: JSON.stringify(inputs)
       };
 
       const { error } = await supabase
@@ -351,8 +387,8 @@ export default function App() {
   }, [lineFilter, monthFilter]);
 
   // Calculation logic based on the provided formulas
-  const results = useMemo((): OEEResults => {
-    const { A, B, C, D, H, K, U, stops = [] } = inputs;
+  const calculateOEEResults = (data: OEEInputs): OEEResults => {
+    const { A, B, C, D, H, K, U, stops = [] } = data;
 
     // Calcular N e Q a partir das paradas
     const N = stops.filter(s => {
@@ -413,7 +449,82 @@ export default function App() {
       qualidade: Math.max(0, qualidade * 100),
       oee: Math.max(0, oee * 100)
     };
+  };
+
+  const results = useMemo((): OEEResults => {
+    return calculateOEEResults(inputs);
   }, [inputs]);
+
+  const dashboardResults = useMemo(() => {
+    if (dashboardRecord && dashboardRecord.raw_data) {
+      try {
+        // Garante que estamos lidando com um objeto, seja ele retornado como string ou já parseado pelo Supabase
+        const rawData = typeof dashboardRecord.raw_data === 'string' 
+          ? JSON.parse(dashboardRecord.raw_data) 
+          : dashboardRecord.raw_data;
+        
+        if (!rawData || typeof rawData !== 'object') return null;
+        return calculateOEEResults(rawData);
+      } catch (e) {
+        console.error("Erro ao processar raw_data para resultados:", e);
+        return null;
+      }
+    }
+    return null;
+  }, [dashboardRecord]);
+
+  const dashboardChartData = useMemo(() => {
+    if (dashboardResults && dashboardRecord && dashboardRecord.raw_data) {
+      try {
+        const rawData = typeof dashboardRecord.raw_data === 'string' 
+          ? JSON.parse(dashboardRecord.raw_data) 
+          : dashboardRecord.raw_data;
+
+        if (!rawData || typeof rawData.A === 'undefined') return [];
+
+        return [
+          { name: 'TEMPO TOTAL', value: Number(rawData.A) || 0, color: '#7e22ce' },
+          { name: 'TEMPO PROGRAMADO', value: Number(dashboardResults.P) || 0, color: '#0ea5e9' },
+          { name: 'TEMPO DE OPERAÇÃO', value: Number(dashboardResults.R) || 0, color: '#15803d' },
+          { name: 'TEMPO LÍQUIDO', value: Number(dashboardResults.T) || 0, color: '#ea580c' },
+          { name: 'TEMPO ÚTIL', value: Number(dashboardResults.X) || 0, color: '#0369a1' },
+        ];
+      } catch (e) {
+        console.error("Erro ao processar raw_data para gráfico:", e);
+        return [];
+      }
+    }
+    return [];
+  }, [dashboardResults, dashboardRecord]);
+
+  // Buscar registro específico para o Dashboard
+  const fetchDashboardRecord = async () => {
+    setIsFetchingDashboard(true);
+    try {
+      const { data, error } = await supabase
+        .from('oee_records')
+        .select('*')
+        .eq('machine_name', dashboardLine)
+        .gte('created_at', `${dashboardDate}T00:00:00`)
+        .lte('created_at', `${dashboardDate}T23:59:59`)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+      setDashboardRecord(data && data.length > 0 ? data[0] : null);
+    } catch (err) {
+      console.error('Erro ao buscar registro do dashboard:', err);
+      setDashboardRecord(null);
+    } finally {
+      setIsFetchingDashboard(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'dashboard') {
+      fetchDashboardRecord();
+    }
+  }, [dashboardDate, dashboardLine, activeTab]);
 
   const generateAIAnalysis = async () => {
     setIsAnalyzing(true);
@@ -586,6 +697,13 @@ export default function App() {
     }
   }, []);
 
+  // Inicializar dashboard com o último registro quando o usuário logar
+  useEffect(() => {
+    if (currentUser && activeTab === 'dashboard' && !dashboardRecord) {
+      fetchLatestRecord();
+    }
+  }, [currentUser, activeTab]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
@@ -622,6 +740,8 @@ export default function App() {
     setCurrentUser(null);
     localStorage.removeItem('oee_guide_session');
     setShowAdminPanel(false);
+    setDashboardRecord(null);
+    setAiAnalysis('');
   };
 
   const [newUserName, setNewUserName] = useState('');
@@ -1138,159 +1258,232 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className="max-w-6xl mx-auto space-y-8"
             >
-              <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="px-2 py-0.5 bg-indigo-500/20 text-indigo-400 text-[10px] font-bold rounded uppercase tracking-wider border border-indigo-500/20">
-                      {inputs.line}
-                    </span>
-                    <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 text-[10px] font-bold rounded uppercase tracking-wider border border-emerald-500/20">
-                      {inputs.sku}
-                    </span>
-                  </div>
-                  <h2 className="text-3xl font-bold tracking-tight text-white">Monitoramento de Eficiência</h2>
-                  <p className="text-slate-400 mt-1">Dados consolidados da linha de produção atual.</p>
-                </div>
-                <div className="flex items-center gap-4">
-                  <button 
-                    onClick={handleDownloadReport}
-                    className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10"
-                  >
-                    <Download size={14} />
-                    Download Relatório
-                  </button>
-                  <button 
-                    onClick={generateAIAnalysis}
-                    disabled={isAnalyzing}
-                    className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-600/20"
-                  >
-                    {isAnalyzing ? <RefreshCw size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                    {isAnalyzing ? 'Analisando...' : 'Gerar Insight IA'}
-                  </button>
-                  <div className="flex items-center gap-2 bg-zinc-900 px-4 py-2 rounded-full border border-white/10 shadow-sm">
-                    <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Tempo Real</span>
-                  </div>
-                </div>
-              </header>
-
-              {/* KPI Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                <KPICard 
-                  title="Disponibilidade" 
-                  value={results.disponibilidade} 
-                  icon={<Clock className="text-blue-400" />} 
-                  color="blue"
-                  description="Tempo Operação / Tempo Programado"
-                />
-                <KPICard 
-                  title="Performance" 
-                  value={results.performance} 
-                  icon={<TrendingUp className="text-orange-400" />} 
-                  color="orange"
-                  description="Tempo Líquido / Tempo Operação"
-                />
-                <KPICard 
-                  title="Qualidade" 
-                  value={results.qualidade} 
-                  icon={<CheckCircle2 className="text-emerald-400" />} 
-                  color="emerald"
-                  description="Tempo Útil / Tempo Líquido"
-                />
-                <KPICard 
-                  title="OEE Global" 
-                  value={results.oee} 
-                  icon={<Gauge className="text-indigo-400" />} 
-                  color="indigo"
-                  isMain
-                  description="Eficiência Global do Equipamento"
-                />
-              </div>
-
-              {/* Charts and Details Section */}
-              <div className="grid grid-cols-1 gap-8">
-                {/* Chart Card */}
-                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
-                  <div className="flex items-center justify-between mb-8">
-                    <h3 className="font-bold text-lg flex items-center gap-2 text-white">
-                      <Activity size={20} className="text-blue-400" />
-                      Decomposição de Tempos (h)
-                    </h3>
-                  </div>
-                  <div className="flex-1 min-h-[400px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart
-                        layout="vertical"
-                        data={chartData}
-                        margin={{ top: 5, right: 60, left: 40, bottom: 5 }}
-                        barSize={50}
+              {/* Dashboard Filters */}
+              <div className="bg-zinc-900/50 backdrop-blur-xl p-6 rounded-3xl border border-white/10 shadow-2xl">
+                <div className="flex flex-col md:flex-row items-center gap-6">
+                  <div className="flex-1 w-full">
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Linha de Produção</label>
+                    <div className="relative group">
+                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-500 group-focus-within:text-blue-400 transition-colors">
+                        <Activity size={18} />
+                      </div>
+                      <select 
+                        value={dashboardLine}
+                        onChange={(e) => setDashboardLine(e.target.value)}
+                        className="w-full bg-zinc-800/50 border border-white/10 text-white pl-11 pr-4 py-3 rounded-2xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500/50 transition-all appearance-none cursor-pointer hover:bg-zinc-800"
                       >
-                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
-                        <XAxis type="number" hide />
-                        <YAxis 
-                          dataKey="name" 
-                          type="category" 
-                          width={150} 
-                          tick={{ fontSize: 12, fontWeight: 600, fill: '#94a3b8' }}
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <Tooltip 
-                          cursor={{ fill: 'rgba(255,255,255,0.03)' }}
-                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.5)' }}
-                          itemStyle={{ color: '#fff' }}
-                          formatter={(value: number) => [value.toFixed(1), 'Valor']}
-                        />
-                        <Bar dataKey="value" radius={[0, 8, 8, 0]}>
-                          {chartData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.color} />
-                          ))}
-                          <LabelList dataKey="value" position="right" formatter={(v: number) => v.toFixed(1)} style={{ fill: '#cbd5e1', fontSize: 14, fontWeight: 700 }} />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+                          <option key={num} value={`Linha 0${num}`}>Linha 0{num}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex-1 w-full">
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Data de Referência</label>
+                    <div className="relative group">
+                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-500 group-focus-within:text-blue-400 transition-colors">
+                        <Calendar size={18} />
+                      </div>
+                      <input 
+                        type="date"
+                        value={dashboardDate}
+                        onChange={(e) => setDashboardDate(e.target.value)}
+                        className="w-full bg-zinc-800/50 border border-white/10 text-white pl-11 pr-4 py-3 rounded-2xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500/50 transition-all cursor-pointer hover:bg-zinc-800"
+                      />
+                    </div>
+                  </div>
+                  <div className="md:pt-6">
+                    <button 
+                      onClick={fetchDashboardRecord}
+                      disabled={isFetchingDashboard}
+                      className="w-full md:w-auto bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-2xl font-bold transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      {isFetchingDashboard ? <RefreshCw size={18} className="animate-spin" /> : <Search size={18} />}
+                      {isFetchingDashboard ? 'Buscando...' : 'Atualizar'}
+                    </button>
                   </div>
                 </div>
               </div>
 
-              {/* Secondary Stats */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                  <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
-                    <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Produção & Velocidade</h3>
-                    <div className="space-y-4">
-                      <StatRow label="Produção Teórica" value={formatNumber(results.G)} unit="fardos" />
-                      <StatRow label="Produção Real" value={formatNumber(inputs.H)} unit="fardos" highlight />
-                      <StatRow label="Velocidade Projeto" value={formatNumber(results.F)} unit="gph" />
+              {dashboardRecord ? (
+                <>
+                  <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="px-2 py-0.5 bg-indigo-500/20 text-indigo-400 text-[10px] font-bold rounded uppercase tracking-wider border border-indigo-500/20">
+                          {dashboardRecord.machine_name}
+                        </span>
+                        <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 text-[10px] font-bold rounded uppercase tracking-wider border border-emerald-500/20">
+                          {dashboardRecord.sku}
+                        </span>
+                      </div>
+                      <h2 className="text-3xl font-bold tracking-tight text-white">Monitoramento de Eficiência</h2>
+                      <p className="text-slate-400 mt-1">Dados salvos em {new Date(dashboardRecord.created_at).toLocaleDateString('pt-BR')} às {new Date(dashboardRecord.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</p>
                     </div>
+                    <div className="flex items-center gap-4">
+                      <button 
+                        onClick={handleDownloadReport}
+                        className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10"
+                      >
+                        <Download size={14} />
+                        Download Relatório
+                      </button>
+                      <button 
+                        onClick={generateAIAnalysis}
+                        disabled={isAnalyzing}
+                        className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-600/20"
+                      >
+                        {isAnalyzing ? <RefreshCw size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                        {isAnalyzing ? 'Analisando...' : 'Gerar Insight IA'}
+                      </button>
+                    </div>
+                  </header>
+
+                  {/* KPI Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <KPICard 
+                      title="Disponibilidade" 
+                      value={dashboardRecord.availability} 
+                      icon={<Clock className="text-blue-400" />} 
+                      color="blue"
+                      description="Tempo Operação / Tempo Programado"
+                    />
+                    <KPICard 
+                      title="Performance" 
+                      value={dashboardRecord.performance} 
+                      icon={<TrendingUp className="text-orange-400" />} 
+                      color="orange"
+                      description="Tempo Líquido / Tempo Operação"
+                    />
+                    <KPICard 
+                      title="Qualidade" 
+                      value={dashboardRecord.quality} 
+                      icon={<CheckCircle2 className="text-emerald-400" />} 
+                      color="emerald"
+                      description="Tempo Útil / Tempo Líquido"
+                    />
+                    <KPICard 
+                      title="OEE Global" 
+                      value={dashboardRecord.oee_score} 
+                      icon={<Gauge className="text-indigo-400" />} 
+                      color="indigo"
+                      isMain
+                      description="Eficiência Global do Equipamento"
+                    />
                   </div>
 
-                  <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
-                    <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Análise de Perdas</h3>
-                    <div className="space-y-4">
-                      <StatRow label="Redução Velocidade" value={formatNumber(results.S)} unit="h" color="text-orange-400" />
-                      <StatRow label="Perda Qualidade" value={formatNumber(results.V)} unit="h" color="text-red-400" />
-                      <StatRow label="Paradas Não Prog." value={formatNumber(results.Q)} unit="h" color="text-red-400" />
-                    </div>
-                  </div>
-
-                  <div className="bg-zinc-800 rounded-3xl p-6 text-white shadow-xl overflow-hidden relative border border-white/5">
-                    <div className="relative z-10">
-                      <h3 className="font-bold text-[10px] opacity-50 uppercase tracking-widest mb-2">Status Operacional</h3>
-                      <p className="text-2xl font-bold mb-4">
-                        {results.oee >= 85 ? 'Classe Mundial' : results.oee >= 65 ? 'Aceitável' : 'Crítico'}
-                      </p>
-                      <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${results.oee}%` }}
-                          transition={{ duration: 1, ease: "easeOut" }}
-                          className={`h-full ${results.oee >= 85 ? 'bg-emerald-400' : results.oee >= 65 ? 'bg-blue-400' : 'bg-red-400'}`}
-                        />
+                  {/* Charts and Details Section */}
+                  <div className="grid grid-cols-1 gap-8">
+                    {/* Chart Card */}
+                    <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                      <div className="flex items-center justify-between mb-8">
+                        <h3 className="font-bold text-lg flex items-center gap-2 text-white">
+                          <Activity size={20} className="text-blue-400" />
+                          Decomposição de Tempos (h)
+                        </h3>
+                      </div>
+                      <div className="flex-1 min-h-[400px]">
+                        {dashboardChartData.length > 0 ? (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart
+                              layout="vertical"
+                              data={dashboardChartData}
+                              margin={{ top: 5, right: 60, left: 40, bottom: 5 }}
+                              barSize={50}
+                            >
+                              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                              <XAxis type="number" hide />
+                              <YAxis 
+                                dataKey="name" 
+                                type="category" 
+                                width={150} 
+                                tick={{ fontSize: 12, fontWeight: 600, fill: '#94a3b8' }}
+                                axisLine={false}
+                                tickLine={false}
+                              />
+                              <Tooltip 
+                                cursor={{ fill: 'rgba(255,255,255,0.03)' }}
+                                contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.5)' }}
+                                itemStyle={{ color: '#fff' }}
+                                formatter={(value: number) => [value.toFixed(1), 'Valor']}
+                              />
+                              <Bar dataKey="value" radius={[0, 8, 8, 0]}>
+                                {dashboardChartData.map((entry, index) => (
+                                  <Cell key={`cell-${index}`} fill={entry.color} />
+                                ))}
+                                <LabelList dataKey="value" position="right" formatter={(v: number) => v.toFixed(1)} style={{ fill: '#cbd5e1', fontSize: 14, fontWeight: 700 }} />
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div className="flex flex-col items-center justify-center h-full text-slate-500 gap-4">
+                            <Activity size={48} className="opacity-20" />
+                            <p className="text-sm font-medium">Gráfico de decomposição indisponível para este registro.</p>
+                          </div>
+                        )}
                       </div>
                     </div>
-                    <Activity className="absolute -right-4 -bottom-4 opacity-[0.03]" size={120} />
                   </div>
+
+                  {/* Secondary Stats */}
+                  {dashboardResults && (
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
+                        <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Produção & Velocidade</h3>
+                        <div className="space-y-4">
+                          <StatRow label="Produção Teórica" value={formatNumber(dashboardResults.G)} unit="fardos" />
+                          <StatRow label="Produção Real" value={formatNumber(JSON.parse(dashboardRecord.raw_data).H)} unit="fardos" highlight />
+                          <StatRow label="Velocidade Projeto" value={formatNumber(dashboardResults.F)} unit="gph" />
+                        </div>
+                      </div>
+
+                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
+                        <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Análise de Perdas</h3>
+                        <div className="space-y-4">
+                          <StatRow label="Redução Velocidade" value={formatNumber(dashboardResults.S)} unit="h" color="text-orange-400" />
+                          <StatRow label="Perda Qualidade" value={formatNumber(dashboardResults.V)} unit="h" color="text-red-400" />
+                          <StatRow label="Paradas Não Prog." value={formatNumber(dashboardResults.Q)} unit="h" color="text-red-400" />
+                        </div>
+                      </div>
+
+                      <div className="bg-zinc-800 rounded-3xl p-6 text-white shadow-xl overflow-hidden relative border border-white/5">
+                        <div className="relative z-10">
+                          <h3 className="font-bold text-[10px] opacity-50 uppercase tracking-widest mb-2">Status Operacional</h3>
+                          <p className="text-2xl font-bold mb-4">
+                            {dashboardRecord.oee_score >= 85 ? 'Classe Mundial' : dashboardRecord.oee_score >= 65 ? 'Aceitável' : 'Crítico'}
+                          </p>
+                          <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+                            <motion.div 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${dashboardRecord.oee_score}%` }}
+                              transition={{ duration: 1, ease: "easeOut" }}
+                              className={`h-full ${dashboardRecord.oee_score >= 85 ? 'bg-emerald-400' : dashboardRecord.oee_score >= 65 ? 'bg-blue-400' : 'bg-red-400'}`}
+                            />
+                          </div>
+                        </div>
+                        <Activity className="absolute -right-4 -bottom-4 opacity-[0.03]" size={120} />
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-20 bg-zinc-900/30 rounded-3xl border border-dashed border-white/10">
+                  <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-6">
+                    <Search size={32} className="text-slate-500" />
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">Nenhum registro encontrado</h3>
+                  <p className="text-slate-400 max-w-md text-center">
+                    Não encontramos dados salvos para a <strong>{dashboardLine}</strong> na data <strong>{new Date(dashboardDate).toLocaleDateString('pt-BR')}</strong>.
+                  </p>
+                  <button 
+                    onClick={() => setActiveTab('inputs')}
+                    className="mt-8 text-blue-400 hover:text-blue-300 font-bold flex items-center gap-2 transition-colors"
+                  >
+                    Ir para Preenchimento de Dados
+                    <ArrowRight size={16} />
+                  </button>
                 </div>
+              )}
 
                 {/* AI Analysis Section */}
                 <AnimatePresence>
@@ -1640,13 +1833,21 @@ export default function App() {
                         className="w-full bg-black border border-white/10 rounded-xl px-4 py-3.5 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-bold text-white text-sm"
                       />
                     </div>
-                    <InputField 
-                      label="Linha de Produção" 
-                      value={inputs.line} 
-                      onChange={(v) => handleInputChange('line', v)} 
-                      icon={<Activity size={16} />}
-                      type="text"
-                    />
+                    <div className="space-y-2.5">
+                      <label className="text-xs font-bold text-slate-400 flex items-center gap-2">
+                        <span className="text-blue-400 opacity-70"><Activity size={16} /></span>
+                        Linha de Produção
+                      </label>
+                      <select 
+                        value={inputs.line} 
+                        onChange={(e) => handleInputChange('line', e.target.value)}
+                        className="w-full bg-black border border-white/10 rounded-xl px-4 py-3.5 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-bold text-white text-sm appearance-none cursor-pointer"
+                      >
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+                          <option key={num} value={`Linha 0${num}`}>Linha 0{num}</option>
+                        ))}
+                      </select>
+                    </div>
                     <InputField 
                       label="Nome do Produto (SKU)" 
                       value={inputs.sku} 
