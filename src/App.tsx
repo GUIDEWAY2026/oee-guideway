@@ -186,22 +186,29 @@ export default function App() {
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
 
   // Initial state based on the provided example image
-  const [inputs, setInputs] = useState<OEEInputs>({
-    date: new Date().toISOString().split('T')[0],
-    sku: 'Água Mineral 500ml',
-    line: 'Linha 01',
-    A: 24,
-    B: 80,
-    C: 12,
-    D: 22000,
-    H: 10000,
-    K: 2,
-    stops: [],
-    U: 2500
+  const [inputs, setInputs] = useState<OEEInputs>(() => {
+    const d = new Date();
+    const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return {
+      date: localDate,
+      sku: 'Água Mineral 500ml',
+      line: 'Linha 01',
+      A: 24,
+      B: 80,
+      C: 12,
+      D: 22000,
+      H: 10000,
+      K: 2,
+      stops: [],
+      U: 2500
+    };
   });
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inputs' | 'evolution'>('dashboard');
-  const [dashboardDate, setDashboardDate] = useState(new Date().toISOString().split('T')[0]);
+  const [dashboardDate, setDashboardDate] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
   const [dashboardLine, setDashboardLine] = useState('Linha 01');
   const [dashboardRecord, setDashboardRecord] = useState<any>(null);
   const [isFetchingDashboard, setIsFetchingDashboard] = useState(false);
@@ -228,8 +235,9 @@ export default function App() {
       
       if (data && data.length > 0) {
         const latest = data[0];
-        // Extrai apenas a parte da data YYYY-MM-DD
-        const recordDate = new Date(latest.created_at).toISOString().split('T')[0];
+        // Extrai apenas a parte da data YYYY-MM-DD (Local)
+        const d = new Date(latest.created_at);
+        const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         
         setDashboardDate(recordDate);
         setDashboardLine(latest.machine_name);
@@ -354,6 +362,7 @@ export default function App() {
     setIsSaving(true);
     try {
       const record = {
+        created_at: new Date(inputs.date + 'T12:00:00').toISOString(), // Usa a data selecionada pelo usuário
         machine_name: inputs.line,
         sku: inputs.sku,
         availability: results.disponibilidade,
@@ -362,8 +371,8 @@ export default function App() {
         oee_score: results.oee,
         shift: `Turnos: ${inputs.K}`,
         notes: `Produção Real: ${inputs.H}`,
-        downtime_data: JSON.stringify(inputs.stops),
-        raw_data: JSON.stringify(inputs)
+        // Salvamos o objeto inputs completo em downtime_data para evitar erro de coluna inexistente
+        downtime_data: JSON.stringify(inputs)
       };
 
       const { error } = await supabase
@@ -455,58 +464,58 @@ export default function App() {
     return calculateOEEResults(inputs);
   }, [inputs]);
 
-  const dashboardResults = useMemo(() => {
-    if (dashboardRecord && dashboardRecord.raw_data) {
-      try {
-        // Garante que estamos lidando com um objeto, seja ele retornado como string ou já parseado pelo Supabase
-        const rawData = typeof dashboardRecord.raw_data === 'string' 
-          ? JSON.parse(dashboardRecord.raw_data) 
-          : dashboardRecord.raw_data;
-        
-        if (!rawData || typeof rawData !== 'object') return null;
-        return calculateOEEResults(rawData);
-      } catch (e) {
-        console.error("Erro ao processar raw_data para resultados:", e);
-        return null;
+  const dashboardData = useMemo(() => {
+    if (!dashboardRecord) return null;
+    
+    try {
+      // Tenta pegar de raw_data ou de downtime_data (onde estamos salvando agora)
+      const sourceData = dashboardRecord.raw_data || dashboardRecord.downtime_data;
+      if (!sourceData) return null;
+
+      const parsed = typeof sourceData === 'string' 
+        ? JSON.parse(sourceData) 
+        : sourceData;
+      
+      // Verifica se é o formato completo (objeto inputs)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'A' in parsed) {
+        const inputs = parsed as OEEInputs;
+        const results = calculateOEEResults(inputs);
+        return { inputs, results };
       }
+    } catch (e) {
+      console.error("Erro ao processar dados do dashboard:", e);
     }
     return null;
   }, [dashboardRecord]);
 
   const dashboardChartData = useMemo(() => {
-    if (dashboardResults && dashboardRecord && dashboardRecord.raw_data) {
-      try {
-        const rawData = typeof dashboardRecord.raw_data === 'string' 
-          ? JSON.parse(dashboardRecord.raw_data) 
-          : dashboardRecord.raw_data;
-
-        if (!rawData || typeof rawData.A === 'undefined') return [];
-
-        return [
-          { name: 'TEMPO TOTAL', value: Number(rawData.A) || 0, color: '#7e22ce' },
-          { name: 'TEMPO PROGRAMADO', value: Number(dashboardResults.P) || 0, color: '#0ea5e9' },
-          { name: 'TEMPO DE OPERAÇÃO', value: Number(dashboardResults.R) || 0, color: '#15803d' },
-          { name: 'TEMPO LÍQUIDO', value: Number(dashboardResults.T) || 0, color: '#ea580c' },
-          { name: 'TEMPO ÚTIL', value: Number(dashboardResults.X) || 0, color: '#0369a1' },
-        ];
-      } catch (e) {
-        console.error("Erro ao processar raw_data para gráfico:", e);
-        return [];
-      }
-    }
-    return [];
-  }, [dashboardResults, dashboardRecord]);
+    if (!dashboardData) return [];
+    
+    const { inputs, results } = dashboardData;
+    return [
+      { name: 'TEMPO TOTAL', value: Number(inputs.A) || 0, color: '#7e22ce' },
+      { name: 'TEMPO PROGRAMADO', value: Number(results.P) || 0, color: '#0ea5e9' },
+      { name: 'TEMPO DE OPERAÇÃO', value: Number(results.R) || 0, color: '#15803d' },
+      { name: 'TEMPO LÍQUIDO', value: Number(results.T) || 0, color: '#ea580c' },
+      { name: 'TEMPO ÚTIL', value: Number(results.X) || 0, color: '#0369a1' },
+    ];
+  }, [dashboardData]);
 
   // Buscar registro específico para o Dashboard
   const fetchDashboardRecord = async () => {
+    if (!currentUser) return;
     setIsFetchingDashboard(true);
     try {
+      // Definir início e fim do dia no fuso horário local e converter para ISO para o Supabase
+      const startDate = new Date(`${dashboardDate}T00:00:00`).toISOString();
+      const endDate = new Date(`${dashboardDate}T23:59:59`).toISOString();
+
       const { data, error } = await supabase
         .from('oee_records')
         .select('*')
         .eq('machine_name', dashboardLine)
-        .gte('created_at', `${dashboardDate}T00:00:00`)
-        .lte('created_at', `${dashboardDate}T23:59:59`)
+        .gte('created_at', startDate)
+        .lte('created_at', endDate)
         .order('created_at', { ascending: false })
         .limit(1);
 
@@ -622,7 +631,14 @@ export default function App() {
     history.forEach(record => {
       if (record.downtime_data) {
         try {
-          const stops: StopEntry[] = JSON.parse(record.downtime_data);
+          const parsed = typeof record.downtime_data === 'string' 
+            ? JSON.parse(record.downtime_data) 
+            : record.downtime_data;
+          
+          // Se for o formato novo (objeto inputs), pegamos a propriedade stops
+          // Se for o formato antigo (array), usamos diretamente
+          const stops: StopEntry[] = Array.isArray(parsed) ? parsed : (parsed.stops || []);
+          
           stops.forEach(stop => {
             stopsMap[stop.code] = (stopsMap[stop.code] || 0) + stop.duration;
           });
@@ -798,7 +814,17 @@ export default function App() {
   };
 
   const handleInputChange = (key: keyof OEEInputs, value: string) => {
-    if (key === 'date' || key === 'sku' || key === 'line') {
+    if (key === 'date') {
+      const selectedDate = new Date(value + 'T00:00:00');
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+      
+      if (selectedDate > today) {
+        alert('Não é permitido registrar dados para datas futuras.');
+        return;
+      }
+      setInputs(prev => ({ ...prev, [key]: value }));
+    } else if (key === 'sku' || key === 'line') {
       setInputs(prev => ({ ...prev, [key]: value }));
     } else {
       const numValue = parseFloat(value) || 0;
@@ -806,8 +832,12 @@ export default function App() {
     }
   };
 
-  const handleDownloadReport = () => {
+  const handleDownloadReport = (customInputs?: OEEInputs, customResults?: OEEResults) => {
+    const reportData = customInputs || inputs;
+    const reportResults = customResults || results;
+
     const markdownToHtml = (text: string) => {
+      // ... (mantém a lógica interna igual)
       let html = text
         .replace(/^### (.*$)/gim, '<h3 style="color: #10b981; margin-top: 25px; margin-bottom: 12px; font-weight: bold; border-left: 4px solid #10b981; padding-left: 10px;">$1</h3>')
         .replace(/^#### (.*$)/gim, '<h4 style="color: #10b981; margin-top: 20px; margin-bottom: 10px; font-weight: bold;">$1</h4>')
@@ -861,7 +891,7 @@ export default function App() {
       <html lang="pt-BR">
       <head>
           <meta charset="UTF-8">
-          <title>Relatório OEE GUIDEWAY - ${inputs.date}</title>
+          <title>Relatório OEE GUIDEWAY - ${reportData.date}</title>
           <style>
               body { font-family: sans-serif; color: #333; line-height: 1.6; padding: 40px; }
               .header { border-bottom: 2px solid #2563eb; padding-bottom: 20px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center; }
@@ -890,38 +920,44 @@ export default function App() {
                   <div class="title">OEE GUIDEWAY - Relatório de Eficiência</div>
               </div>
               <div style="text-align: right;">
-                  <div class="date">Data: ${new Date(inputs.date).toLocaleDateString('pt-BR')}</div>
-                  <div style="font-size: 12px; color: #64748b; font-weight: bold; margin-top: 5px;">Linha: ${inputs.line}</div>
-                  <div style="font-size: 12px; color: #64748b; font-weight: bold;">Produto: ${inputs.sku}</div>
+                  <div class="date">Data: ${new Date(reportData.date).toLocaleDateString('pt-BR')}</div>
+                  <div style="font-size: 12px; color: #64748b; font-weight: bold; margin-top: 5px;">Linha: ${reportData.line}</div>
+                  <div style="font-size: 12px; color: #64748b; font-weight: bold;">Produto: ${reportData.sku}</div>
               </div>
           </div>
 
           <div class="grid">
               <div class="card">
                   <div class="card-title">OEE Global</div>
-                  <div class="card-value">${results.oee.toFixed(1)}%</div>
+                  <div class="card-value">${reportResults.oee.toFixed(1)}%</div>
               </div>
               <div class="card">
                   <div class="card-title">Disponibilidade</div>
-                  <div class="card-value">${results.disponibilidade.toFixed(1)}%</div>
+                  <div class="card-value">${reportResults.disponibilidade.toFixed(1)}%</div>
               </div>
               <div class="card">
                   <div class="card-title">Performance</div>
-                  <div class="card-value">${results.performance.toFixed(1)}%</div>
+                  <div class="card-value">${reportResults.performance.toFixed(1)}%</div>
               </div>
               <div class="card">
                   <div class="card-title">Qualidade</div>
-                  <div class="card-value">${results.qualidade.toFixed(1)}%</div>
+                  <div class="card-value">${reportResults.qualidade.toFixed(1)}%</div>
               </div>
           </div>
 
           <div class="section-title">Decomposição de Tempos (h)</div>
           <div class="chart-sim">
-              ${chartData.map(d => `
+              ${[
+                { name: 'TEMPO TOTAL', value: reportData.A, color: '#7e22ce' },
+                { name: 'TEMPO PROGRAMADO', value: reportResults.P, color: '#0ea5e9' },
+                { name: 'TEMPO DE OPERAÇÃO', value: reportResults.R, color: '#15803d' },
+                { name: 'TEMPO LÍQUIDO', value: reportResults.T, color: '#ea580c' },
+                { name: 'TEMPO ÚTIL', value: reportResults.X, color: '#0369a1' },
+              ].map(d => `
                   <div class="bar-container">
                       <div class="bar-label">${d.name}</div>
                       <div class="bar-outer">
-                          <div class="bar-inner" style="width: ${(d.value / inputs.A) * 100}%; background: ${d.color};"></div>
+                          <div class="bar-inner" style="width: ${(d.value / reportData.A) * 100}%; background: ${d.color};"></div>
                       </div>
                       <div style="margin-left: 10px; font-size: 12px; font-weight: bold;">${d.value.toFixed(1)}h</div>
                   </div>
@@ -938,11 +974,11 @@ export default function App() {
                   </tr>
               </thead>
               <tbody>
-                  <tr><td>Produção Real</td><td>${formatNumber(inputs.H)}</td><td>fardos</td></tr>
-                  <tr><td>Produção Teórica</td><td>${formatNumber(results.G)}</td><td>fardos</td></tr>
-                  <tr><td>Velocidade de Projeto</td><td>${formatNumber(results.F)}</td><td>gph</td></tr>
-                  <tr><td>Paradas Não Programadas</td><td>${formatNumber(results.Q)}</td><td>h</td></tr>
-                  <tr><td>Perda por Qualidade</td><td>${inputs.U}</td><td>garrafas</td></tr>
+                  <tr><td>Produção Real</td><td>${formatNumber(reportData.H)}</td><td>fardos</td></tr>
+                  <tr><td>Produção Teórica</td><td>${formatNumber(reportResults.G)}</td><td>fardos</td></tr>
+                  <tr><td>Velocidade de Projeto</td><td>${formatNumber(reportResults.F)}</td><td>gph</td></tr>
+                  <tr><td>Paradas Não Programadas</td><td>${formatNumber(reportResults.Q)}</td><td>h</td></tr>
+                  <tr><td>Perda por Qualidade</td><td>${reportData.U}</td><td>garrafas</td></tr>
               </tbody>
           </table>
 
@@ -964,7 +1000,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Relatorio_OEE_Guideway_${inputs.date}.html`;
+    a.download = `Relatorio_OEE_Guideway_${reportData.date}.html`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -1322,7 +1358,7 @@ export default function App() {
                     </div>
                     <div className="flex items-center gap-4">
                       <button 
-                        onClick={handleDownloadReport}
+                        onClick={() => handleDownloadReport(dashboardData?.inputs, dashboardData?.results)}
                         className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10"
                       >
                         <Download size={14} />
@@ -1426,23 +1462,23 @@ export default function App() {
                   </div>
 
                   {/* Secondary Stats */}
-                  {dashboardResults && (
+                  {dashboardData && (
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                       <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
                         <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Produção & Velocidade</h3>
                         <div className="space-y-4">
-                          <StatRow label="Produção Teórica" value={formatNumber(dashboardResults.G)} unit="fardos" />
-                          <StatRow label="Produção Real" value={formatNumber(JSON.parse(dashboardRecord.raw_data).H)} unit="fardos" highlight />
-                          <StatRow label="Velocidade Projeto" value={formatNumber(dashboardResults.F)} unit="gph" />
+                          <StatRow label="Produção Teórica" value={formatNumber(dashboardData.results.G)} unit="fardos" />
+                          <StatRow label="Produção Real" value={formatNumber(dashboardData.inputs.H)} unit="fardos" highlight />
+                          <StatRow label="Velocidade Projeto" value={formatNumber(dashboardData.results.F)} unit="gph" />
                         </div>
                       </div>
 
                       <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
                         <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Análise de Perdas</h3>
                         <div className="space-y-4">
-                          <StatRow label="Redução Velocidade" value={formatNumber(dashboardResults.S)} unit="h" color="text-orange-400" />
-                          <StatRow label="Perda Qualidade" value={formatNumber(dashboardResults.V)} unit="h" color="text-red-400" />
-                          <StatRow label="Paradas Não Prog." value={formatNumber(dashboardResults.Q)} unit="h" color="text-red-400" />
+                          <StatRow label="Redução Velocidade" value={formatNumber(dashboardData.results.S)} unit="h" color="text-orange-400" />
+                          <StatRow label="Perda Qualidade" value={formatNumber(dashboardData.results.V)} unit="h" color="text-red-400" />
+                          <StatRow label="Paradas Não Prog." value={formatNumber(dashboardData.results.Q)} unit="h" color="text-red-400" />
                         </div>
                       </div>
 
@@ -1473,7 +1509,7 @@ export default function App() {
                   </div>
                   <h3 className="text-xl font-bold text-white mb-2">Nenhum registro encontrado</h3>
                   <p className="text-slate-400 max-w-md text-center">
-                    Não encontramos dados salvos para a <strong>{dashboardLine}</strong> na data <strong>{new Date(dashboardDate).toLocaleDateString('pt-BR')}</strong>.
+                    Não encontramos dados salvos para a <strong>{dashboardLine}</strong> na data <strong>{dashboardDate.split('-').reverse().join('/')}</strong>.
                   </p>
                   <button 
                     onClick={() => setActiveTab('inputs')}
@@ -1829,6 +1865,7 @@ export default function App() {
                       <input 
                         type="date" 
                         value={inputs.date} 
+                        max={new Date().toISOString().split('T')[0]}
                         onChange={(e) => handleInputChange('date', e.target.value)}
                         className="w-full bg-black border border-white/10 rounded-xl px-4 py-3.5 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-bold text-white text-sm"
                       />
