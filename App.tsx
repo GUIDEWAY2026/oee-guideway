@@ -36,16 +36,64 @@ import {
   BarChart3,
   Calendar,
   Box,
-  Cpu
+  Cpu,
+  Search,
+  ArrowRight
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import { supabase } from '@/lib/supabase';
 
+// Error Boundary Component
+class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("Uncaught error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-black flex items-center justify-center p-8 text-white font-sans">
+          <div className="max-w-md w-full bg-zinc-900 border border-red-500/20 p-8 rounded-3xl shadow-2xl">
+            <h1 className="text-2xl font-bold text-red-500 mb-4">Algo deu errado</h1>
+            <p className="text-slate-400 mb-6 text-sm">Ocorreu um erro inesperado na aplicação. Por favor, tente recarregar a página.</p>
+            <div className="bg-black/50 p-4 rounded-xl border border-white/5 mb-6 overflow-auto max-h-40">
+              <code className="text-[10px] text-red-400 font-mono">{this.state.error?.toString()}</code>
+            </div>
+            <button 
+              onClick={() => window.location.reload()}
+              className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-2xl transition-all"
+            >
+              Recarregar Página
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 // Types for our OEE data
+interface StopEntry {
+  id: string;
+  code: number;
+  duration: number; // minutos
+}
+
 interface OEEInputs {
   date: string; // Data do Relatório
   sku: string; // Nome do Produto (SKU)
@@ -56,10 +104,41 @@ interface OEEInputs {
   D: number; // Velocidade Nominal (gph)
   H: number; // Produção Real (fardos)
   K: number; // Turnos de Produção
-  N: number; // Paradas Programadas (h)
-  Q: number; // Paradas Não Programadas (h)
+  stops: StopEntry[]; // Paradas detalhadas
   U: number; // Perda por Qualidade (garrafas)
 }
+
+const STOP_CODES = [
+  { code: 1, description: 'Problema no RINSER', category: 'NP' },
+  { code: 2, description: 'Problema na ENCHEDORA', category: 'NP' },
+  { code: 3, description: 'Problema no ROSQUEADOR', category: 'NP' },
+  { code: 21, description: 'GARRAFA AMASSADA', category: 'NP' },
+  { code: 22, description: 'TAMPA AGARRADA', category: 'NP' },
+  { code: 23, description: 'REGULAGEM DE TORQUE', category: 'NP' },
+  { code: 24, description: 'REGULAGEM DEVIDO A TROCA DE KIT', category: 'NP' },
+  { code: 31, description: 'SOPRADORA', category: 'NP' },
+  { code: 32, description: 'ROTULADORA', category: 'NP' },
+  { code: 33, description: 'EMPACOTADORA', category: 'NP' },
+  { code: 41, description: 'FALTA DE ÁGUA', category: 'NP' },
+  { code: 42, description: 'FALTA DE ENERGIA', category: 'NP' },
+  { code: 43, description: 'FALTA DE AR COMPRIMIDO', category: 'NP' },
+  { code: 44, description: 'FALTA DE TAMPA', category: 'NP' },
+  { code: 45, description: 'FALTA DE GARRAFA', category: 'NP' },
+  { code: 46, description: 'FALTA DE MATERIAL DE EMBALAGEM', category: 'NP' },
+  { code: 47, description: 'FALTA DE PALETS', category: 'NP' },
+  { code: 101, description: 'REFEIÇÃO', category: 'P' },
+  { code: 102, description: 'CAFÉ', category: 'P' },
+  { code: 103, description: 'CIP', category: 'P' },
+  { code: 104, description: 'MANUTENÇÃO PLANEJADA', category: 'P' },
+  { code: 105, description: 'TROCA DE PRODUTO', category: 'P' },
+  { code: 106, description: 'INICIO DE PRODUÇÃO', category: 'P' },
+  { code: 107, description: 'FINAL DE PRODUÇÃO', category: 'P' },
+  { code: 108, description: 'REUNIÃO', category: 'P' },
+  { code: 109, description: 'TREINAMENTO', category: 'P' },
+  { code: 110, description: 'TESTES DE EQUIPAMENTOS / MATERIAIS', category: 'P' },
+  { code: 111, description: 'TROCA DE KIT', category: 'P' },
+  { code: 500, description: 'OUTROS', category: 'NP' },
+];
 
 interface OEEResults {
   F: number; // Velocidade de Projeto
@@ -74,6 +153,8 @@ interface OEEResults {
   T: number; // Tempo Líquido
   V: number; // Tempo Qualidade
   X: number; // Tempo Útil
+  N: number; // Paradas Programadas (h)
+  Q: number; // Paradas Não Programadas (h)
   disponibilidade: number;
   performance: number;
   qualidade: number;
@@ -88,19 +169,10 @@ interface User {
   isAdmin: boolean;
 }
 
-// --- CONFIGURAÇÃO DE ACESSOS PADRÃO (ALTERE AQUI SE PRECISAR) ---
-const DEFAULT_USERS: User[] = [
-  { name: 'Operador 01', email: 'Usuario01@guideway.com.br', password: 'G7w2K9pL', isAdmin: false },
-  { name: 'Operador 02', email: 'Usuario02@guideway.com.br', password: 'X4v8M1nR', isAdmin: false },
-  { name: 'Operador 03', email: 'Usuario03@guideway.com.br', password: 'B5z9T2qW', isAdmin: false },
-  { name: 'Operador 04', email: 'Usuario04@guideway.com.br', password: 'H1k7J4sD', isAdmin: false },
-  { name: 'Operador 05', email: 'Usuario05@guideway.com.br', password: 'Y3m9N6tF', isAdmin: false },
-  { name: 'Operador 06', email: 'Usuario06@guideway.com.br', password: 'C2b8V5xG', isAdmin: false },
-  { name: 'Operador 07', email: 'Usuario07@guideway.com.br', password: 'P9l1K4jH', isAdmin: false },
-  { name: 'Operador 08', email: 'Usuario08@guideway.com.br', password: 'R7f3D6sA', isAdmin: false },
-  { name: 'Operador 09', email: 'Usuario09@guideway.com.br', password: 'W2q8E5rT', isAdmin: false },
-  { name: 'Operador 10', email: 'Usuario10@guideway.com.br', password: 'Z1x7C4vB', isAdmin: false },
-];
+// --- CONFIGURAÇÃO DE ACESSOS PADRÃO ---
+// Agora os usuários são gerenciados via Supabase.
+// O administrador principal será verificado pelo e-mail.
+const MAIN_ADMIN_EMAIL = 'josemarcelolustosa@gmail.com';
 // ---------------------------------------------------------------
 
 export default function App() {
@@ -111,30 +183,124 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
 
   // Initial state based on the provided example image
-  const [inputs, setInputs] = useState<OEEInputs>({
-    date: new Date().toISOString().split('T')[0],
-    sku: 'Água Mineral 500ml',
-    line: 'Linha 01',
-    A: 24,
-    B: 80,
-    C: 12,
-    D: 22000,
-    H: 10000,
-    K: 2,
-    N: 2.5,
-    Q: 1.5,
-    U: 2500
+  const [inputs, setInputs] = useState<OEEInputs>(() => {
+    const d = new Date();
+    const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return {
+      date: localDate,
+      sku: 'Água Mineral 500ml',
+      line: 'Linha 01',
+      A: 24,
+      B: 80,
+      C: 12,
+      D: 22000,
+      H: 10000,
+      K: 2,
+      stops: [],
+      U: 2500
+    };
   });
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'inputs' | 'evolution'>('dashboard');
+  const [dashboardDate, setDashboardDate] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+  const [dashboardLine, setDashboardLine] = useState('Linha 01');
+  const [dashboardRecord, setDashboardRecord] = useState<any>(null);
+  const [isFetchingDashboard, setIsFetchingDashboard] = useState(false);
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [history, setHistory] = useState<any[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lineFilter, setLineFilter] = useState<string>('Todas');
   const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
+
+  // Buscar o último registro geral para inicializar o Dashboard
+  const fetchLatestRecord = async () => {
+    if (!currentUser) return;
+    setIsFetchingDashboard(true);
+    try {
+      const { data, error } = await supabase
+        .from('oee_records')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+      
+      if (data && data.length > 0) {
+        const latest = data[0];
+        // Extrai apenas a parte da data YYYY-MM-DD (Local)
+        const d = new Date(latest.created_at);
+        const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        
+        setDashboardDate(recordDate);
+        setDashboardLine(latest.machine_name);
+        setDashboardRecord(latest);
+      }
+    } catch (err) {
+      console.error('Erro ao buscar último registro para o dashboard:', err);
+    } finally {
+      setIsFetchingDashboard(false);
+    }
+  };
+
+  // Buscar usuários do Supabase (Apenas para ADM)
+  const ensureAdminExists = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('email')
+        .eq('email', MAIN_ADMIN_EMAIL)
+        .single();
+      
+      if (error && error.code === 'PGRST116') { // PGRST116 = Not Found
+        console.log('Criando usuário administrador inicial...');
+        await supabase.from('users').insert([{
+          name: 'Administrador Guideway',
+          email: MAIN_ADMIN_EMAIL,
+          password: 'admin', // Senha padrão inicial
+          is_admin: true
+        }]);
+      }
+    } catch (err) {
+      console.error('Erro ao verificar administrador:', err);
+    }
+  };
+
+  const fetchUsers = async () => {
+    if (!currentUser?.isAdmin) return;
+    setIsLoadingUsers(true);
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .order('name', { ascending: true });
+      
+      if (error) throw error;
+      if (data) setUsers(data.map(u => ({
+        name: u.name,
+        email: u.email,
+        password: u.password,
+        isAdmin: u.is_admin
+      })));
+    } catch (error: any) {
+      console.error('Erro ao buscar usuários:', error);
+    } finally {
+      setIsLoadingUsers(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showAdminPanel) {
+      fetchUsers();
+    }
+  }, [showAdminPanel]);
 
   // Carregar histórico do Supabase
   const fetchHistory = async () => {
@@ -169,6 +335,10 @@ export default function App() {
 
   // Excluir registro do Supabase
   const deleteRecord = async (id: string) => {
+    if (!currentUser?.isAdmin) {
+      alert('Apenas administradores podem excluir registros.');
+      return;
+    }
     if (!confirm('Tem certeza que deseja excluir este registro permanentemente?')) return;
     
     try {
@@ -189,8 +359,10 @@ export default function App() {
 
   // Salvar registro no Supabase
   const saveRecord = async () => {
+    setIsSaving(true);
     try {
       const record = {
+        created_at: new Date(inputs.date + 'T12:00:00').toISOString(), // Usa a data selecionada pelo usuário
         machine_name: inputs.line,
         sku: inputs.sku,
         availability: results.disponibilidade,
@@ -198,7 +370,9 @@ export default function App() {
         quality: results.qualidade,
         oee_score: results.oee,
         shift: `Turnos: ${inputs.K}`,
-        notes: `Produção Real: ${inputs.H}`
+        notes: `Produção Real: ${inputs.H}`,
+        // Salvamos o objeto inputs completo em downtime_data para evitar erro de coluna inexistente
+        downtime_data: JSON.stringify(inputs)
       };
 
       const { error } = await supabase
@@ -206,9 +380,14 @@ export default function App() {
         .insert([record]);
 
       if (error) throw error;
+      
+      alert('Registro salvo com sucesso no banco de dados!');
       fetchHistory(); // Atualiza a lista após salvar
-    } catch (error) {
+    } catch (error: any) {
       console.error('Erro ao salvar registro:', error);
+      alert('Erro ao salvar registro: ' + error.message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -217,8 +396,19 @@ export default function App() {
   }, [lineFilter, monthFilter]);
 
   // Calculation logic based on the provided formulas
-  const results = useMemo((): OEEResults => {
-    const { A, B, C, D, H, K, N, Q, U } = inputs;
+  const calculateOEEResults = (data: OEEInputs): OEEResults => {
+    const { A, B, C, D, H, K, U, stops = [] } = data;
+
+    // Calcular N e Q a partir das paradas
+    const N = stops.filter(s => {
+      const config = STOP_CODES.find(c => c.code === Number(s.code));
+      return config?.category === 'P';
+    }).reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0) / 60;
+
+    const Q = stops.filter(s => {
+      const config = STOP_CODES.find(c => c.code === Number(s.code));
+      return config?.category === 'NP';
+    }).reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0) / 60;
 
     // F = D * (B/100)
     const F = D * (B / 100);
@@ -262,13 +452,88 @@ export default function App() {
     const oee = disponibilidade * performance * qualidade;
 
     return {
-      F, G, I, L, M, O, P, R, S, T, V, X,
+      F, G, I, L, M, O, P, R, S, T, V, X, N, Q,
       disponibilidade: Math.max(0, disponibilidade * 100),
       performance: Math.max(0, performance * 100),
       qualidade: Math.max(0, qualidade * 100),
       oee: Math.max(0, oee * 100)
     };
+  };
+
+  const results = useMemo((): OEEResults => {
+    return calculateOEEResults(inputs);
   }, [inputs]);
+
+  const dashboardData = useMemo(() => {
+    if (!dashboardRecord) return null;
+    
+    try {
+      // Tenta pegar de raw_data ou de downtime_data (onde estamos salvando agora)
+      const sourceData = dashboardRecord.raw_data || dashboardRecord.downtime_data;
+      if (!sourceData) return null;
+
+      const parsed = typeof sourceData === 'string' 
+        ? JSON.parse(sourceData) 
+        : sourceData;
+      
+      // Verifica se é o formato completo (objeto inputs)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'A' in parsed) {
+        const inputs = parsed as OEEInputs;
+        const results = calculateOEEResults(inputs);
+        return { inputs, results };
+      }
+    } catch (e) {
+      console.error("Erro ao processar dados do dashboard:", e);
+    }
+    return null;
+  }, [dashboardRecord]);
+
+  const dashboardChartData = useMemo(() => {
+    if (!dashboardData) return [];
+    
+    const { inputs, results } = dashboardData;
+    return [
+      { name: 'TEMPO TOTAL', value: Number(inputs.A) || 0, color: '#7e22ce' },
+      { name: 'TEMPO PROGRAMADO', value: Number(results.P) || 0, color: '#0ea5e9' },
+      { name: 'TEMPO DE OPERAÇÃO', value: Number(results.R) || 0, color: '#15803d' },
+      { name: 'TEMPO LÍQUIDO', value: Number(results.T) || 0, color: '#ea580c' },
+      { name: 'TEMPO ÚTIL', value: Number(results.X) || 0, color: '#0369a1' },
+    ];
+  }, [dashboardData]);
+
+  // Buscar registro específico para o Dashboard
+  const fetchDashboardRecord = async () => {
+    if (!currentUser) return;
+    setIsFetchingDashboard(true);
+    try {
+      // Definir início e fim do dia no fuso horário local e converter para ISO para o Supabase
+      const startDate = new Date(`${dashboardDate}T00:00:00`).toISOString();
+      const endDate = new Date(`${dashboardDate}T23:59:59`).toISOString();
+
+      const { data, error } = await supabase
+        .from('oee_records')
+        .select('*')
+        .eq('machine_name', dashboardLine)
+        .gte('created_at', startDate)
+        .lte('created_at', endDate)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+      setDashboardRecord(data && data.length > 0 ? data[0] : null);
+    } catch (err) {
+      console.error('Erro ao buscar registro do dashboard:', err);
+      setDashboardRecord(null);
+    } finally {
+      setIsFetchingDashboard(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'dashboard') {
+      fetchDashboardRecord();
+    }
+  }, [dashboardDate, dashboardLine, activeTab]);
 
   const generateAIAnalysis = async () => {
     setIsAnalyzing(true);
@@ -304,7 +569,7 @@ export default function App() {
       DADOS DE PRODUÇÃO:
       - Produção Real: ${inputs.H} fardos
       - Produção Teórica: ${results.G.toFixed(1)} fardos
-      - Paradas Não Programadas: ${inputs.Q}h
+      - Paradas Não Programadas: ${results.Q.toFixed(1)}h
       - Perda por Qualidade: ${inputs.U} garrafas
       - Redução de Velocidade (Perda de Performance): ${results.S.toFixed(1)}h
       
@@ -342,9 +607,6 @@ export default function App() {
       }
 
       setAiAnalysis(text);
-      
-      // Salva no banco após gerar a análise com sucesso
-      saveRecord();
     } catch (error: any) {
       console.error('Erro na análise IA:', error);
       const errorMessage = error.message || 'Erro desconhecido';
@@ -355,21 +617,84 @@ export default function App() {
   };
 
   const consolidatedMetrics = useMemo(() => {
-    if (history.length === 0) return { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0 };
+    if (history.length === 0) return { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0, paretoNP: [], paretoP: [] };
+    
     const sum = history.reduce((acc, curr) => ({
       oee: acc.oee + curr.oee_score,
       disponibilidade: acc.disponibilidade + curr.availability,
       performance: acc.performance + curr.performance,
       qualidade: acc.qualidade + curr.quality,
     }), { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0 });
+
+    // Consolidar dados para o Pareto
+    const stopsMap: { [key: number]: number } = {};
+    history.forEach(record => {
+      if (record.downtime_data) {
+        try {
+          const parsed = typeof record.downtime_data === 'string' 
+            ? JSON.parse(record.downtime_data) 
+            : record.downtime_data;
+          
+          // Se for o formato novo (objeto inputs), pegamos a propriedade stops
+          // Se for o formato antigo (array), usamos diretamente
+          const stops: StopEntry[] = Array.isArray(parsed) ? parsed : (parsed.stops || []);
+          
+          stops.forEach(stop => {
+            stopsMap[stop.code] = (stopsMap[stop.code] || 0) + stop.duration;
+          });
+        } catch (e) {
+          console.error("Erro ao processar downtime_data", e);
+        }
+      }
+    });
+
+    const allPareto = Object.entries(stopsMap)
+      .map(([code, duration]) => {
+        const config = STOP_CODES.find(c => c.code === parseInt(code));
+        return {
+          name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
+          duration,
+          category: config?.category || 'NP'
+        };
+      })
+      .sort((a, b) => b.duration - a.duration);
+    
+    const paretoNP = allPareto.filter(item => item.category === 'NP');
+    const paretoP = allPareto.filter(item => item.category === 'P');
     
     return {
       oee: sum.oee / history.length,
       disponibilidade: sum.disponibilidade / history.length,
       performance: sum.performance / history.length,
       qualidade: sum.qualidade / history.length,
+      paretoNP,
+      paretoP
     };
   }, [history]);
+
+  const currentParetoData = useMemo(() => {
+    const stopsMap: { [key: number]: number } = {};
+    inputs.stops.forEach(stop => {
+      const code = Number(stop.code);
+      stopsMap[code] = (stopsMap[code] || 0) + (Number(stop.duration) || 0);
+    });
+
+    const allPareto = Object.entries(stopsMap)
+      .map(([code, duration]) => {
+        const config = STOP_CODES.find(c => c.code === Number(code));
+        return {
+          name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
+          duration,
+          category: config?.category || 'NP'
+        };
+      })
+      .sort((a, b) => b.duration - a.duration);
+
+    return {
+      np: allPareto.filter(item => item.category === 'NP'),
+      p: allPareto.filter(item => item.category === 'P')
+    };
+  }, [inputs.stops]);
 
   const chartData = [
     { name: 'TEMPO TOTAL', value: inputs.A, color: '#7e22ce' },
@@ -379,49 +704,51 @@ export default function App() {
     { name: 'TEMPO ÚTIL', value: results.X, color: '#0369a1' },
   ];
 
-  // Initialize users and check session
+  // Initialize session
   useEffect(() => {
-    const savedUsers = localStorage.getItem('oee_guide_users');
-    const adminUser: User = {
-      name: 'José Marcelo',
-      email: 'josemarcelolustosa@gmail.com',
-      password: 'papapipi1',
-      isAdmin: true
-    };
-
-    let finalUsers = [adminUser, ...DEFAULT_USERS];
-
-    if (savedUsers) {
-      const parsed = JSON.parse(savedUsers);
-      // Filter out any users that are already in the default or admin list to avoid duplicates
-      const customUsers = parsed.filter((u: User) => 
-        u.email !== adminUser.email && 
-        !DEFAULT_USERS.some(def => def.email === u.email)
-      );
-      finalUsers = [...finalUsers, ...customUsers];
-    }
-    
-    setUsers(finalUsers);
-
+    ensureAdminExists();
     const session = localStorage.getItem('oee_guide_session');
     if (session) {
       setCurrentUser(JSON.parse(session));
     }
   }, []);
 
+  // Inicializar dashboard com o último registro quando o usuário logar
   useEffect(() => {
-    localStorage.setItem('oee_guide_users', JSON.stringify(users));
-  }, [users]);
+    if (currentUser && activeTab === 'dashboard' && !dashboardRecord) {
+      fetchLatestRecord();
+    }
+  }, [currentUser, activeTab]);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    const user = users.find(u => u.email === loginEmail && u.password === loginPassword);
-    if (user) {
+    setLoginError('');
+    
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', loginEmail)
+        .eq('password', loginPassword)
+        .single();
+
+      if (error || !data) {
+        setLoginError('E-mail ou senha incorretos.');
+        return;
+      }
+
+      const user: User = {
+        name: data.name,
+        email: data.email,
+        password: data.password,
+        isAdmin: data.is_admin
+      };
+
       setCurrentUser(user);
       localStorage.setItem('oee_guide_session', JSON.stringify(user));
-      setLoginError('');
-    } else {
-      setLoginError('E-mail ou senha incorretos.');
+    } catch (error) {
+      console.error('Erro no login:', error);
+      setLoginError('Erro ao conectar com o servidor.');
     }
   };
 
@@ -429,44 +756,75 @@ export default function App() {
     setCurrentUser(null);
     localStorage.removeItem('oee_guide_session');
     setShowAdminPanel(false);
+    setDashboardRecord(null);
+    setAiAnalysis('');
   };
 
   const [newUserName, setNewUserName] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
+  const [newUserIsAdmin, setNewUserIsAdmin] = useState(false);
 
-  const handleCreateUser = (e: React.FormEvent) => {
+  const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (users.find(u => u.email === newUserEmail)) {
-      alert('Este e-mail já está cadastrado.');
-      return;
+    try {
+      const { error } = await supabase
+        .from('users')
+        .insert([{
+          name: newUserName,
+          email: newUserEmail,
+          password: newUserPassword,
+          is_admin: newUserIsAdmin
+        }]);
+
+      if (error) throw error;
+
+      alert('Usuário criado com sucesso!');
+      setNewUserName('');
+      setNewUserEmail('');
+      setNewUserPassword('');
+      setNewUserIsAdmin(false);
+      fetchUsers();
+    } catch (error: any) {
+      console.error('Erro ao criar usuário:', error);
+      alert('Erro ao criar usuário: ' + error.message);
     }
-    const newUser: User = {
-      name: newUserName,
-      email: newUserEmail,
-      password: newUserPassword,
-      isAdmin: false
-    };
-    setUsers([...users, newUser]);
-    setNewUserName('');
-    setNewUserEmail('');
-    setNewUserPassword('');
   };
 
-  const handleDeleteUser = (email: string) => {
-    if (email === 'josemarcelolustosa@gmail.com') {
+  const handleDeleteUser = async (email: string) => {
+    if (email === MAIN_ADMIN_EMAIL) {
       alert('O administrador principal não pode ser excluído.');
       return;
     }
-    if (DEFAULT_USERS.some(u => u.email === email)) {
-      alert('Usuários padrão do sistema não podem ser excluídos via interface.');
-      return;
+    
+    if (!confirm(`Deseja realmente excluir o usuário ${email}?`)) return;
+
+    try {
+      const { error } = await supabase
+        .from('users')
+        .delete()
+        .eq('email', email);
+
+      if (error) throw error;
+      fetchUsers();
+    } catch (error: any) {
+      console.error('Erro ao excluir usuário:', error);
+      alert('Erro ao excluir: ' + error.message);
     }
-    setUsers(users.filter(u => u.email !== email));
   };
 
   const handleInputChange = (key: keyof OEEInputs, value: string) => {
-    if (key === 'date' || key === 'sku' || key === 'line') {
+    if (key === 'date') {
+      const selectedDate = new Date(value + 'T00:00:00');
+      const today = new Date();
+      today.setHours(23, 59, 59, 999);
+      
+      if (selectedDate > today) {
+        alert('Não é permitido registrar dados para datas futuras.');
+        return;
+      }
+      setInputs(prev => ({ ...prev, [key]: value }));
+    } else if (key === 'sku' || key === 'line') {
       setInputs(prev => ({ ...prev, [key]: value }));
     } else {
       const numValue = parseFloat(value) || 0;
@@ -474,8 +832,12 @@ export default function App() {
     }
   };
 
-  const handleDownloadReport = () => {
+  const handleDownloadReport = (customInputs?: OEEInputs, customResults?: OEEResults) => {
+    const reportData = customInputs || inputs;
+    const reportResults = customResults || results;
+
     const markdownToHtml = (text: string) => {
+      // ... (mantém a lógica interna igual)
       let html = text
         .replace(/^### (.*$)/gim, '<h3 style="color: #10b981; margin-top: 25px; margin-bottom: 12px; font-weight: bold; border-left: 4px solid #10b981; padding-left: 10px;">$1</h3>')
         .replace(/^#### (.*$)/gim, '<h4 style="color: #10b981; margin-top: 20px; margin-bottom: 10px; font-weight: bold;">$1</h4>')
@@ -529,7 +891,7 @@ export default function App() {
       <html lang="pt-BR">
       <head>
           <meta charset="UTF-8">
-          <title>Relatório OEE GUIDEWAY - ${inputs.date}</title>
+          <title>Relatório OEE GUIDEWAY - ${reportData.date}</title>
           <style>
               body { font-family: sans-serif; color: #333; line-height: 1.6; padding: 40px; }
               .header { border-bottom: 2px solid #2563eb; padding-bottom: 20px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center; }
@@ -558,38 +920,44 @@ export default function App() {
                   <div class="title">OEE GUIDEWAY - Relatório de Eficiência</div>
               </div>
               <div style="text-align: right;">
-                  <div class="date">Data: ${new Date(inputs.date).toLocaleDateString('pt-BR')}</div>
-                  <div style="font-size: 12px; color: #64748b; font-weight: bold; margin-top: 5px;">Linha: ${inputs.line}</div>
-                  <div style="font-size: 12px; color: #64748b; font-weight: bold;">Produto: ${inputs.sku}</div>
+                  <div class="date">Data: ${new Date(reportData.date).toLocaleDateString('pt-BR')}</div>
+                  <div style="font-size: 12px; color: #64748b; font-weight: bold; margin-top: 5px;">Linha: ${reportData.line}</div>
+                  <div style="font-size: 12px; color: #64748b; font-weight: bold;">Produto: ${reportData.sku}</div>
               </div>
           </div>
 
           <div class="grid">
               <div class="card">
                   <div class="card-title">OEE Global</div>
-                  <div class="card-value">${results.oee.toFixed(1)}%</div>
+                  <div class="card-value">${reportResults.oee.toFixed(1)}%</div>
               </div>
               <div class="card">
                   <div class="card-title">Disponibilidade</div>
-                  <div class="card-value">${results.disponibilidade.toFixed(1)}%</div>
+                  <div class="card-value">${reportResults.disponibilidade.toFixed(1)}%</div>
               </div>
               <div class="card">
                   <div class="card-title">Performance</div>
-                  <div class="card-value">${results.performance.toFixed(1)}%</div>
+                  <div class="card-value">${reportResults.performance.toFixed(1)}%</div>
               </div>
               <div class="card">
                   <div class="card-title">Qualidade</div>
-                  <div class="card-value">${results.qualidade.toFixed(1)}%</div>
+                  <div class="card-value">${reportResults.qualidade.toFixed(1)}%</div>
               </div>
           </div>
 
           <div class="section-title">Decomposição de Tempos (h)</div>
           <div class="chart-sim">
-              ${chartData.map(d => `
+              ${[
+                { name: 'TEMPO TOTAL', value: reportData.A, color: '#7e22ce' },
+                { name: 'TEMPO PROGRAMADO', value: reportResults.P, color: '#0ea5e9' },
+                { name: 'TEMPO DE OPERAÇÃO', value: reportResults.R, color: '#15803d' },
+                { name: 'TEMPO LÍQUIDO', value: reportResults.T, color: '#ea580c' },
+                { name: 'TEMPO ÚTIL', value: reportResults.X, color: '#0369a1' },
+              ].map(d => `
                   <div class="bar-container">
                       <div class="bar-label">${d.name}</div>
                       <div class="bar-outer">
-                          <div class="bar-inner" style="width: ${(d.value / inputs.A) * 100}%; background: ${d.color};"></div>
+                          <div class="bar-inner" style="width: ${(d.value / reportData.A) * 100}%; background: ${d.color};"></div>
                       </div>
                       <div style="margin-left: 10px; font-size: 12px; font-weight: bold;">${d.value.toFixed(1)}h</div>
                   </div>
@@ -606,11 +974,11 @@ export default function App() {
                   </tr>
               </thead>
               <tbody>
-                  <tr><td>Produção Real</td><td>${formatNumber(inputs.H)}</td><td>fardos</td></tr>
-                  <tr><td>Produção Teórica</td><td>${formatNumber(results.G)}</td><td>fardos</td></tr>
-                  <tr><td>Velocidade de Projeto</td><td>${formatNumber(results.F)}</td><td>gph</td></tr>
-                  <tr><td>Paradas Não Programadas</td><td>${inputs.Q}</td><td>h</td></tr>
-                  <tr><td>Perda por Qualidade</td><td>${inputs.U}</td><td>garrafas</td></tr>
+                  <tr><td>Produção Real</td><td>${formatNumber(reportData.H)}</td><td>fardos</td></tr>
+                  <tr><td>Produção Teórica</td><td>${formatNumber(reportResults.G)}</td><td>fardos</td></tr>
+                  <tr><td>Velocidade de Projeto</td><td>${formatNumber(reportResults.F)}</td><td>gph</td></tr>
+                  <tr><td>Paradas Não Programadas</td><td>${formatNumber(reportResults.Q)}</td><td>h</td></tr>
+                  <tr><td>Perda por Qualidade</td><td>${reportData.U}</td><td>garrafas</td></tr>
               </tbody>
           </table>
 
@@ -632,7 +1000,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Relatorio_OEE_Guideway_${inputs.date}.html`;
+    a.download = `Relatorio_OEE_Guideway_${reportData.date}.html`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -707,7 +1075,8 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-white font-sans flex flex-col md:flex-row">
+    <ErrorBoundary>
+      <div className="min-h-screen bg-black text-white font-sans flex flex-col md:flex-row">
       {/* Sidebar for Desktop / Bottom Nav for Mobile */}
       <aside className="w-full md:w-80 bg-zinc-900 border-r border-white/10 flex flex-col shrink-0 z-20">
         <div className="p-8 border-b border-white/5 flex flex-col items-center text-center gap-4">
@@ -826,19 +1195,31 @@ export default function App() {
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Senha</label>
                         <input 
-                          type="password" 
+                          type="text" 
                           value={newUserPassword}
                           onChange={(e) => setNewUserPassword(e.target.value)}
                           className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                          placeholder="Senha do usuário"
+                          placeholder="Defina a senha"
                           required
                         />
+                      </div>
+                      <div className="flex items-center gap-3 px-2">
+                        <input 
+                          type="checkbox" 
+                          id="isAdmin"
+                          checked={newUserIsAdmin}
+                          onChange={(e) => setNewUserIsAdmin(e.target.checked)}
+                          className="w-4 h-4 rounded border-white/10 bg-white/5 text-blue-600 focus:ring-blue-500/50"
+                        />
+                        <label htmlFor="isAdmin" className="text-xs font-bold text-slate-400 cursor-pointer">
+                          Este usuário é Administrador?
+                        </label>
                       </div>
                       <button 
                         type="submit"
                         className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-2xl transition-all"
                       >
-                        CRIAR USUÁRIO
+                        CRIAR USUÁRIO NO BANCO
                       </button>
                     </form>
                   </div>
@@ -846,32 +1227,14 @@ export default function App() {
 
               <div className="lg:col-span-2">
                 <div className="bg-zinc-900 border border-white/10 rounded-3xl overflow-hidden">
-                  <div className="px-8 py-5 bg-white/5 border-b border-white/10">
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Contas de Acesso Padrão (Código)</h3>
-                  </div>
-                  <table className="w-full text-left">
-                    <thead>
-                      <tr className="bg-white/5 border-b border-white/10">
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Nome</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">E-mail</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Senha</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/10">
-                      {DEFAULT_USERS.map((user) => (
-                        <tr key={user.email} className="hover:bg-white/5 transition-colors">
-                          <td className="px-8 py-4 text-sm font-bold text-white">{user.name}</td>
-                          <td className="px-8 py-4 text-sm text-slate-400">{user.email}</td>
-                          <td className="px-8 py-4 text-sm font-mono text-emerald-400">{user.password}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="bg-zinc-900 border border-white/10 rounded-3xl overflow-hidden mt-8">
-                  <div className="px-8 py-5 bg-white/5 border-b border-white/10">
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Usuários Personalizados (Navegador)</h3>
+                  <div className="px-8 py-5 bg-white/5 border-b border-white/10 flex justify-between items-center">
+                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Usuários Cadastrados no Supabase</h3>
+                    <button 
+                      onClick={fetchUsers}
+                      className="p-2 text-slate-400 hover:text-white transition-colors"
+                    >
+                      <RefreshCw size={16} className={isLoadingUsers ? 'animate-spin' : ''} />
+                    </button>
                   </div>
                   <table className="w-full text-left">
                     <thead>
@@ -879,19 +1242,27 @@ export default function App() {
                         <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Nome</th>
                         <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">E-mail</th>
                         <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Perfil</th>
+                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Senha</th>
                         <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/10">
-                      {users.filter(u => u.email !== 'josemarcelolustosa@gmail.com' && !DEFAULT_USERS.some(d => d.email === u.email)).map((user) => (
+                      {isLoadingUsers ? (
+                        <tr>
+                          <td colSpan={5} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                            Carregando usuários...
+                          </td>
+                        </tr>
+                      ) : users.map((user) => (
                         <tr key={user.email} className="hover:bg-white/5 transition-colors">
                           <td className="px-8 py-5 text-sm font-bold text-white">{user.name}</td>
                           <td className="px-8 py-5 text-sm text-slate-400">{user.email}</td>
                           <td className="px-8 py-5">
-                            <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-zinc-800 text-slate-400">
-                              Operador
+                            <span className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-lg ${user.isAdmin ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-slate-400'}`}>
+                              {user.isAdmin ? 'Admin' : 'Operador'}
                             </span>
                           </td>
+                          <td className="px-8 py-5 text-sm font-mono text-slate-500">{user.password}</td>
                           <td className="px-8 py-5 text-right">
                             <button 
                               onClick={() => handleDeleteUser(user.email)}
@@ -902,10 +1273,10 @@ export default function App() {
                           </td>
                         </tr>
                       ))}
-                      {users.filter(u => u.email !== 'josemarcelolustosa@gmail.com' && !DEFAULT_USERS.some(d => d.email === u.email)).length === 0 && (
+                      {!isLoadingUsers && users.length === 0 && (
                         <tr>
-                          <td colSpan={4} className="px-8 py-10 text-center text-slate-500 text-sm italic">
-                            Nenhum usuário personalizado criado.
+                          <td colSpan={5} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                            Nenhum usuário encontrado no banco.
                           </td>
                         </tr>
                       )}
@@ -923,212 +1294,285 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className="max-w-6xl mx-auto space-y-8"
             >
-              <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="px-2 py-0.5 bg-indigo-500/20 text-indigo-400 text-[10px] font-bold rounded uppercase tracking-wider border border-indigo-500/20">
-                      {inputs.line}
-                    </span>
-                    <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 text-[10px] font-bold rounded uppercase tracking-wider border border-emerald-500/20">
-                      {inputs.sku}
-                    </span>
-                  </div>
-                  <h2 className="text-3xl font-bold tracking-tight text-white">Monitoramento de Eficiência</h2>
-                  <p className="text-slate-400 mt-1">Dados consolidados da linha de produção atual.</p>
-                </div>
-                <div className="flex items-center gap-4">
-                  <button 
-                    onClick={handleDownloadReport}
-                    className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10"
-                  >
-                    <Download size={14} />
-                    Download Relatório
-                  </button>
-                  <button 
-                    onClick={generateAIAnalysis}
-                    disabled={isAnalyzing}
-                    className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-600/20"
-                  >
-                    {isAnalyzing ? <RefreshCw size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                    {isAnalyzing ? 'Analisando...' : 'Gerar Insight IA'}
-                  </button>
-                  <div className="flex items-center gap-2 bg-zinc-900 px-4 py-2 rounded-full border border-white/10 shadow-sm">
-                    <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Tempo Real</span>
-                  </div>
-                </div>
-              </header>
-
-              {/* KPI Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                <KPICard 
-                  title="Disponibilidade" 
-                  value={results.disponibilidade} 
-                  icon={<Clock className="text-blue-400" />} 
-                  color="blue"
-                  description="Tempo Operação / Tempo Programado"
-                />
-                <KPICard 
-                  title="Performance" 
-                  value={results.performance} 
-                  icon={<TrendingUp className="text-orange-400" />} 
-                  color="orange"
-                  description="Tempo Líquido / Tempo Operação"
-                />
-                <KPICard 
-                  title="Qualidade" 
-                  value={results.qualidade} 
-                  icon={<CheckCircle2 className="text-emerald-400" />} 
-                  color="emerald"
-                  description="Tempo Útil / Tempo Líquido"
-                />
-                <KPICard 
-                  title="OEE Global" 
-                  value={results.oee} 
-                  icon={<Gauge className="text-indigo-400" />} 
-                  color="indigo"
-                  isMain
-                  description="Eficiência Global do Equipamento"
-                />
-              </div>
-
-              {/* Charts and Details Section */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                {/* Chart Card */}
-                <div className="lg:col-span-2 bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
-                  <div className="flex items-center justify-between mb-8">
-                    <h3 className="font-bold text-lg flex items-center gap-2 text-white">
-                      <Activity size={20} className="text-blue-400" />
-                      Decomposição de Tempos (h)
-                    </h3>
-                  </div>
-                  <div className="flex-1 min-h-[400px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart
-                        layout="vertical"
-                        data={chartData}
-                        margin={{ top: 5, right: 40, left: 40, bottom: 5 }}
-                        barSize={50}
+              {/* Dashboard Filters */}
+              <div className="bg-zinc-900/50 backdrop-blur-xl p-6 rounded-3xl border border-white/10 shadow-2xl">
+                <div className="flex flex-col md:flex-row items-center gap-6">
+                  <div className="flex-1 w-full">
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Linha de Produção</label>
+                    <div className="relative group">
+                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-500 group-focus-within:text-blue-400 transition-colors">
+                        <Activity size={18} />
+                      </div>
+                      <select 
+                        value={dashboardLine}
+                        onChange={(e) => setDashboardLine(e.target.value)}
+                        className="w-full bg-zinc-800/50 border border-white/10 text-white pl-11 pr-4 py-3 rounded-2xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500/50 transition-all appearance-none cursor-pointer hover:bg-zinc-800"
                       >
-                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
-                        <XAxis type="number" hide />
-                        <YAxis 
-                          dataKey="name" 
-                          type="category" 
-                          width={150} 
-                          tick={{ fontSize: 10, fontWeight: 600, fill: '#94a3b8' }}
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <Tooltip 
-                          cursor={{ fill: 'rgba(255,255,255,0.03)' }}
-                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.5)' }}
-                          itemStyle={{ color: '#fff' }}
-                          formatter={(value: number) => [value.toFixed(1), 'Valor']}
-                        />
-                        <Bar dataKey="value" radius={[0, 8, 8, 0]}>
-                          {chartData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.color} />
-                          ))}
-                          <LabelList dataKey="value" position="right" formatter={(v: number) => v.toFixed(1)} style={{ fill: '#cbd5e1', fontSize: 13, fontWeight: 700 }} />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                {/* Secondary Stats */}
-                <div className="space-y-6">
-                  <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
-                    <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Produção & Velocidade</h3>
-                    <div className="space-y-4">
-                      <StatRow label="Produção Teórica" value={formatNumber(results.G)} unit="fardos" />
-                      <StatRow label="Produção Real" value={formatNumber(inputs.H)} unit="fardos" highlight />
-                      <StatRow label="Velocidade Projeto" value={formatNumber(results.F)} unit="gph" />
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+                          <option key={num} value={`Linha 0${num}`}>Linha 0{num}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
-
-                  <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
-                    <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Análise de Perdas</h3>
-                    <div className="space-y-4">
-                      <StatRow label="Redução Velocidade" value={formatNumber(results.S)} unit="h" color="text-orange-400" />
-                      <StatRow label="Perda Qualidade" value={formatNumber(results.V)} unit="h" color="text-red-400" />
-                      <StatRow label="Paradas Não Prog." value={formatNumber(inputs.Q)} unit="h" color="text-red-400" />
-                    </div>
-                  </div>
-
-                  <div className="bg-zinc-800 rounded-3xl p-6 text-white shadow-xl overflow-hidden relative border border-white/5">
-                    <div className="relative z-10">
-                      <h3 className="font-bold text-[10px] opacity-50 uppercase tracking-widest mb-2">Status Operacional</h3>
-                      <p className="text-2xl font-bold mb-4">
-                        {results.oee >= 85 ? 'Classe Mundial' : results.oee >= 65 ? 'Aceitável' : 'Crítico'}
-                      </p>
-                      <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${results.oee}%` }}
-                          transition={{ duration: 1, ease: "easeOut" }}
-                          className={`h-full ${results.oee >= 85 ? 'bg-emerald-400' : results.oee >= 65 ? 'bg-blue-400' : 'bg-red-400'}`}
-                        />
+                  <div className="flex-1 w-full">
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Data de Referência</label>
+                    <div className="relative group">
+                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-500 group-focus-within:text-blue-400 transition-colors">
+                        <Calendar size={18} />
                       </div>
+                      <input 
+                        type="date"
+                        value={dashboardDate}
+                        onChange={(e) => setDashboardDate(e.target.value)}
+                        className="w-full bg-zinc-800/50 border border-white/10 text-white pl-11 pr-4 py-3 rounded-2xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500/50 transition-all cursor-pointer hover:bg-zinc-800"
+                      />
                     </div>
-                    <Activity className="absolute -right-4 -bottom-4 opacity-[0.03]" size={120} />
+                  </div>
+                  <div className="md:pt-6">
+                    <button 
+                      onClick={fetchDashboardRecord}
+                      disabled={isFetchingDashboard}
+                      className="w-full md:w-auto bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-2xl font-bold transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2 disabled:opacity-50"
+                    >
+                      {isFetchingDashboard ? <RefreshCw size={18} className="animate-spin" /> : <Search size={18} />}
+                      {isFetchingDashboard ? 'Buscando...' : 'Atualizar'}
+                    </button>
                   </div>
                 </div>
               </div>
 
-              {/* AI Analysis Section */}
-              <AnimatePresence>
-                {(aiAnalysis || isAnalyzing) && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 20 }}
-                    className="bg-zinc-900 rounded-3xl border border-indigo-500/30 shadow-2xl shadow-indigo-500/5 overflow-hidden"
-                  >
-                    <div className="bg-indigo-600/10 px-8 py-4 border-b border-indigo-500/20 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="p-2 bg-indigo-600 rounded-lg">
-                          <Sparkles size={18} className="text-white" />
-                        </div>
-                        <h3 className="font-bold text-indigo-100">Análise Crítica Guideway AI</h3>
+              {dashboardRecord ? (
+                <>
+                  <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="px-2 py-0.5 bg-indigo-500/20 text-indigo-400 text-[10px] font-bold rounded uppercase tracking-wider border border-indigo-500/20">
+                          {dashboardRecord.machine_name}
+                        </span>
+                        <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 text-[10px] font-bold rounded uppercase tracking-wider border border-emerald-500/20">
+                          {dashboardRecord.sku}
+                        </span>
                       </div>
-                      {isAnalyzing && (
-                        <div className="flex items-center gap-2 text-indigo-300 text-xs font-bold animate-pulse">
-                          Processando dados...
-                        </div>
-                      )}
+                      <h2 className="text-3xl font-bold tracking-tight text-white">Monitoramento de Eficiência</h2>
+                      <p className="text-slate-400 mt-1">Dados salvos em {new Date(dashboardRecord.created_at).toLocaleDateString('pt-BR')} às {new Date(dashboardRecord.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</p>
                     </div>
-                    <div className="p-8">
-                      {isAnalyzing ? (
+                    <div className="flex items-center gap-4">
+                      <button 
+                        onClick={() => handleDownloadReport(dashboardData?.inputs, dashboardData?.results)}
+                        className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10"
+                      >
+                        <Download size={14} />
+                        Download Relatório
+                      </button>
+                      <button 
+                        onClick={generateAIAnalysis}
+                        disabled={isAnalyzing}
+                        className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-600/20"
+                      >
+                        {isAnalyzing ? <RefreshCw size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                        {isAnalyzing ? 'Analisando...' : 'Gerar Insight IA'}
+                      </button>
+                    </div>
+                  </header>
+
+                  {/* KPI Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <KPICard 
+                      title="Disponibilidade" 
+                      value={dashboardRecord.availability} 
+                      icon={<Clock className="text-blue-400" />} 
+                      color="blue"
+                      description="Tempo Operação / Tempo Programado"
+                    />
+                    <KPICard 
+                      title="Performance" 
+                      value={dashboardRecord.performance} 
+                      icon={<TrendingUp className="text-orange-400" />} 
+                      color="orange"
+                      description="Tempo Líquido / Tempo Operação"
+                    />
+                    <KPICard 
+                      title="Qualidade" 
+                      value={dashboardRecord.quality} 
+                      icon={<CheckCircle2 className="text-emerald-400" />} 
+                      color="emerald"
+                      description="Tempo Útil / Tempo Líquido"
+                    />
+                    <KPICard 
+                      title="OEE Global" 
+                      value={dashboardRecord.oee_score} 
+                      icon={<Gauge className="text-indigo-400" />} 
+                      color="indigo"
+                      isMain
+                      description="Eficiência Global do Equipamento"
+                    />
+                  </div>
+
+                  {/* Charts and Details Section */}
+                  <div className="grid grid-cols-1 gap-8">
+                    {/* Chart Card */}
+                    <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                      <div className="flex items-center justify-between mb-8">
+                        <h3 className="font-bold text-lg flex items-center gap-2 text-white">
+                          <Activity size={20} className="text-blue-400" />
+                          Decomposição de Tempos (h)
+                        </h3>
+                      </div>
+                      <div className="flex-1 min-h-[400px]">
+                        {dashboardChartData.length > 0 ? (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart
+                              layout="vertical"
+                              data={dashboardChartData}
+                              margin={{ top: 5, right: 60, left: 40, bottom: 5 }}
+                              barSize={50}
+                            >
+                              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.05)" />
+                              <XAxis type="number" hide />
+                              <YAxis 
+                                dataKey="name" 
+                                type="category" 
+                                width={150} 
+                                tick={{ fontSize: 12, fontWeight: 600, fill: '#94a3b8' }}
+                                axisLine={false}
+                                tickLine={false}
+                              />
+                              <Tooltip 
+                                cursor={{ fill: 'rgba(255,255,255,0.03)' }}
+                                contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.5)' }}
+                                itemStyle={{ color: '#fff' }}
+                                formatter={(value: number) => [value.toFixed(1), 'Valor']}
+                              />
+                              <Bar dataKey="value" radius={[0, 8, 8, 0]}>
+                                {dashboardChartData.map((entry, index) => (
+                                  <Cell key={`cell-${index}`} fill={entry.color} />
+                                ))}
+                                <LabelList dataKey="value" position="right" formatter={(v: number) => v.toFixed(1)} style={{ fill: '#cbd5e1', fontSize: 14, fontWeight: 700 }} />
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div className="flex flex-col items-center justify-center h-full text-slate-500 gap-4">
+                            <Activity size={48} className="opacity-20" />
+                            <p className="text-sm font-medium">Gráfico de decomposição indisponível para este registro.</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Secondary Stats */}
+                  {dashboardData && (
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
+                        <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Produção & Velocidade</h3>
                         <div className="space-y-4">
-                          <div className="h-4 bg-white/5 rounded w-3/4 animate-pulse" />
-                          <div className="h-4 bg-white/5 rounded w-full animate-pulse" />
-                          <div className="h-4 bg-white/5 rounded w-5/6 animate-pulse" />
+                          <StatRow label="Produção Teórica" value={formatNumber(dashboardData.results.G)} unit="fardos" />
+                          <StatRow label="Produção Real" value={formatNumber(dashboardData.inputs.H)} unit="fardos" highlight />
+                          <StatRow label="Velocidade Projeto" value={formatNumber(dashboardData.results.F)} unit="gph" />
                         </div>
-                      ) : (
-                        <div className="prose prose-invert prose-sm max-w-none 
-                          prose-headings:text-emerald-400 prose-headings:font-bold prose-headings:mt-6 prose-headings:mb-3 
-                          prose-strong:text-white prose-strong:font-bold 
-                          prose-p:text-slate-200 prose-p:leading-relaxed prose-p:mb-4
-                          prose-hr:border-white/10 prose-hr:my-6
-                          prose-table:text-xs prose-th:text-emerald-400 prose-td:text-slate-300">
-                          <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{aiAnalysis}</Markdown>
+                      </div>
+
+                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
+                        <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Análise de Perdas</h3>
+                        <div className="space-y-4">
+                          <StatRow label="Redução Velocidade" value={formatNumber(dashboardData.results.S)} unit="h" color="text-orange-400" />
+                          <StatRow label="Perda Qualidade" value={formatNumber(dashboardData.results.V)} unit="h" color="text-red-400" />
+                          <StatRow label="Paradas Não Prog." value={formatNumber(dashboardData.results.Q)} unit="h" color="text-red-400" />
                         </div>
-                      )}
+                      </div>
+
+                      <div className="bg-zinc-800 rounded-3xl p-6 text-white shadow-xl overflow-hidden relative border border-white/5">
+                        <div className="relative z-10">
+                          <h3 className="font-bold text-[10px] opacity-50 uppercase tracking-widest mb-2">Status Operacional</h3>
+                          <p className="text-2xl font-bold mb-4">
+                            {dashboardRecord.oee_score >= 85 ? 'Classe Mundial' : dashboardRecord.oee_score >= 65 ? 'Aceitável' : 'Crítico'}
+                          </p>
+                          <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+                            <motion.div 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${dashboardRecord.oee_score}%` }}
+                              transition={{ duration: 1, ease: "easeOut" }}
+                              className={`h-full ${dashboardRecord.oee_score >= 85 ? 'bg-emerald-400' : dashboardRecord.oee_score >= 65 ? 'bg-blue-400' : 'bg-red-400'}`}
+                            />
+                          </div>
+                        </div>
+                        <Activity className="absolute -right-4 -bottom-4 opacity-[0.03]" size={120} />
+                      </div>
                     </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </motion.div>
-          ) : activeTab === 'evolution' ? (
-            <motion.div 
-              key="evolution"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="max-w-6xl mx-auto space-y-8"
-            >
+                  )}
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-20 bg-zinc-900/30 rounded-3xl border border-dashed border-white/10">
+                  <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-6">
+                    <Search size={32} className="text-slate-500" />
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">Nenhum registro encontrado</h3>
+                  <p className="text-slate-400 max-w-md text-center">
+                    Não encontramos dados salvos para a <strong>{dashboardLine}</strong> na data <strong>{dashboardDate.split('-').reverse().join('/')}</strong>.
+                  </p>
+                  <button 
+                    onClick={() => setActiveTab('inputs')}
+                    className="mt-8 text-blue-400 hover:text-blue-300 font-bold flex items-center gap-2 transition-colors"
+                  >
+                    Ir para Preenchimento de Dados
+                    <ArrowRight size={16} />
+                  </button>
+                </div>
+              )}
+
+                {/* AI Analysis Section */}
+                <AnimatePresence>
+                  {(aiAnalysis || isAnalyzing) && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 20 }}
+                      className="bg-zinc-900 rounded-3xl border border-indigo-500/30 shadow-2xl shadow-indigo-500/5 overflow-hidden"
+                    >
+                      <div className="bg-indigo-600/10 px-8 py-4 border-b border-indigo-500/20 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 bg-indigo-600 rounded-lg">
+                            <Sparkles size={18} className="text-white" />
+                          </div>
+                          <h3 className="font-bold text-indigo-100">Análise Crítica Guideway AI</h3>
+                        </div>
+                        {isAnalyzing && (
+                          <div className="flex items-center gap-2 text-indigo-300 text-xs font-bold animate-pulse">
+                            Processando dados...
+                          </div>
+                        )}
+                      </div>
+                      <div className="p-8">
+                        {isAnalyzing ? (
+                          <div className="space-y-4">
+                            <div className="h-4 bg-white/5 rounded w-3/4 animate-pulse" />
+                            <div className="h-4 bg-white/5 rounded w-full animate-pulse" />
+                            <div className="h-4 bg-white/5 rounded w-5/6 animate-pulse" />
+                          </div>
+                        ) : (
+                          <div className="prose prose-invert prose-sm max-w-none 
+                            prose-headings:text-emerald-400 prose-headings:font-bold prose-headings:mt-6 prose-headings:mb-3 
+                            prose-strong:text-white prose-strong:font-bold 
+                            prose-p:text-slate-200 prose-p:leading-relaxed prose-p:mb-4
+                            prose-hr:border-white/10 prose-hr:my-6
+                            prose-table:text-xs prose-th:text-emerald-400 prose-td:text-slate-300">
+                            <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{aiAnalysis}</Markdown>
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+            ) : activeTab === 'evolution' ? (
+              <motion.div 
+                key="evolution"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="max-w-6xl mx-auto space-y-8"
+              >
               <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                 <div>
                   <h2 className="text-3xl font-bold tracking-tight text-white">Evolução Histórica</h2>
@@ -1205,6 +1649,85 @@ export default function App() {
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Gráfico de Pareto de Paradas */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                  <h3 className="font-bold text-lg flex items-center gap-2 text-red-400 mb-8">
+                    <AlertTriangle size={20} />
+                    Pareto Não Programadas (Minutos Acumulados)
+                  </h3>
+                  <div className="h-[400px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart 
+                        data={consolidatedMetrics.paretoNP}
+                        margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                        <XAxis 
+                          dataKey="name" 
+                          tick={{ fontSize: 10, fill: '#94a3b8' }}
+                          interval={0}
+                          angle={-45}
+                          textAnchor="end"
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis 
+                          tick={{ fontSize: 10, fill: '#94a3b8' }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                          formatter={(value: number) => [value + ' min', 'Duração']}
+                        />
+                        <Bar dataKey="duration" fill="#ef4444" radius={[4, 4, 0, 0]}>
+                          <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                  <h3 className="font-bold text-lg flex items-center gap-2 text-blue-400 mb-8">
+                    <Clock size={20} />
+                    Pareto Programadas (Minutos Acumulados)
+                  </h3>
+                  <div className="h-[400px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart 
+                        data={consolidatedMetrics.paretoP}
+                        margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                        <XAxis 
+                          dataKey="name" 
+                          tick={{ fontSize: 10, fill: '#94a3b8' }}
+                          interval={0}
+                          angle={-45}
+                          textAnchor="end"
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis 
+                          tick={{ fontSize: 10, fill: '#94a3b8' }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                          formatter={(value: number) => [value + ' min', 'Duração']}
+                        />
+                        <Bar dataKey="duration" fill="#3b82f6" radius={[4, 4, 0, 0]}>
+                          <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
               </div>
 
@@ -1294,13 +1817,15 @@ export default function App() {
                               </span>
                             </td>
                             <td className="px-8 py-4 text-right">
-                              <button 
-                                onClick={() => deleteRecord(record.id)}
-                                className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                                title="Excluir Registro"
-                              >
-                                <Trash2 size={16} />
-                              </button>
+                              {currentUser.isAdmin && (
+                                <button 
+                                  onClick={() => deleteRecord(record.id)}
+                                  className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                  title="Excluir Registro"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))
@@ -1316,7 +1841,7 @@ export default function App() {
                 </div>
               </div>
             </motion.div>
-          ) : (
+          ) : activeTab === 'inputs' ? (
             <motion.div 
               key="inputs"
               initial={{ opacity: 0, x: 20 }}
@@ -1340,17 +1865,26 @@ export default function App() {
                       <input 
                         type="date" 
                         value={inputs.date} 
+                        max={new Date().toISOString().split('T')[0]}
                         onChange={(e) => handleInputChange('date', e.target.value)}
                         className="w-full bg-black border border-white/10 rounded-xl px-4 py-3.5 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-bold text-white text-sm"
                       />
                     </div>
-                    <InputField 
-                      label="Linha de Produção" 
-                      value={inputs.line} 
-                      onChange={(v) => handleInputChange('line', v)} 
-                      icon={<Activity size={16} />}
-                      type="text"
-                    />
+                    <div className="space-y-2.5">
+                      <label className="text-xs font-bold text-slate-400 flex items-center gap-2">
+                        <span className="text-blue-400 opacity-70"><Activity size={16} /></span>
+                        Linha de Produção
+                      </label>
+                      <select 
+                        value={inputs.line} 
+                        onChange={(e) => handleInputChange('line', e.target.value)}
+                        className="w-full bg-black border border-white/10 rounded-xl px-4 py-3.5 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-bold text-white text-sm appearance-none cursor-pointer"
+                      >
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
+                          <option key={num} value={`Linha 0${num}`}>Linha 0{num}</option>
+                        ))}
+                      </select>
+                    </div>
                     <InputField 
                       label="Nome do Produto (SKU)" 
                       value={inputs.sku} 
@@ -1409,39 +1943,142 @@ export default function App() {
                     />
                   </InputGroup>
 
-                  <InputGroup title="Paradas Registradas" fullWidth>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                      <InputField 
-                        label="N - Paradas Programadas (h)" 
-                        value={inputs.N} 
-                        onChange={(v) => handleInputChange('N', v)} 
-                        icon={<Clock size={16} />}
-                      />
-                      <InputField 
-                        label="Q - Paradas Não Programadas (h)" 
-                        value={inputs.Q} 
-                        onChange={(v) => handleInputChange('Q', v)} 
-                        icon={<AlertTriangle size={16} />}
-                      />
+                  <InputGroup title="Registro de Paradas (Conforme Formulário)" fullWidth>
+                    <div className="space-y-6">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs text-slate-400">Insira cada parada individualmente com seu respectivo código.</p>
+                        {inputs.stops.length > 0 && (
+                          <button 
+                            onClick={() => setInputs(prev => ({ ...prev, stops: [] }))}
+                            className="text-[10px] font-bold text-red-400 uppercase tracking-widest hover:text-red-300 transition-colors flex items-center gap-1"
+                          >
+                            <Trash2 size={12} />
+                            Limpar Tudo
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="space-y-3">
+                        {inputs.stops.map((stop, index) => {
+                          const stopConfig = STOP_CODES.find(c => c.code === stop.code);
+                          return (
+                            <motion.div 
+                              initial={{ opacity: 0, x: -10 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              key={stop.id} 
+                              className="flex items-center gap-4 bg-black/40 p-4 rounded-2xl border border-white/5 group hover:border-white/10 transition-all"
+                            >
+                              <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
+                                {index + 1}
+                              </div>
+                              <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
+                                  <select 
+                                    value={stop.code}
+                                    onChange={(e) => {
+                                      const newStops = [...inputs.stops];
+                                      newStops[index].code = parseInt(e.target.value);
+                                      setInputs(prev => ({ ...prev, stops: newStops }));
+                                    }}
+                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                  >
+                                    {STOP_CODES.map(c => (
+                                      <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Duração (Minutos)</label>
+                                  <div className="relative">
+                                    <input 
+                                      type="number"
+                                      value={stop.duration}
+                                      onChange={(e) => {
+                                        const newStops = [...inputs.stops];
+                                        newStops[index].duration = parseFloat(e.target.value) || 0;
+                                        setInputs(prev => ({ ...prev, stops: newStops }));
+                                      }}
+                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all pr-12"
+                                      placeholder="0"
+                                    />
+                                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-500 uppercase">min</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <button 
+                                onClick={() => {
+                                  const newStops = inputs.stops.filter((_, i) => i !== index);
+                                  setInputs(prev => ({ ...prev, stops: newStops }));
+                                }}
+                                className="p-2 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg"
+                              >
+                                <Trash2 size={18} />
+                              </button>
+                            </motion.div>
+                          );
+                        })}
+                      </div>
+                      
+                      <button 
+                        onClick={() => {
+                          const newStop: StopEntry = {
+                            id: crypto.randomUUID(),
+                            code: 1,
+                            duration: 0
+                          };
+                          setInputs(prev => ({ ...prev, stops: [...prev.stops, newStop] }));
+                        }}
+                        className="w-full py-6 border-2 border-dashed border-white/10 rounded-2xl text-slate-500 hover:text-white hover:border-white/20 hover:bg-white/5 transition-all flex items-center justify-center gap-3 font-bold text-sm"
+                      >
+                        <RefreshCw size={18} className="text-blue-500" />
+                        Adicionar Parada do Formulário
+                      </button>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-6 border-t border-white/5">
+                        <div className="bg-blue-500/5 p-5 rounded-2xl border border-blue-500/10 flex justify-between items-center">
+                          <div>
+                            <p className="text-[10px] font-bold text-blue-400 uppercase mb-1 tracking-widest">Soma Paradas Programadas (N)</p>
+                            <p className="text-2xl font-black text-white">{results.N.toFixed(2)}<span className="text-xs ml-1 text-slate-500">h</span></p>
+                          </div>
+                          <Clock size={24} className="text-blue-500/30" />
+                        </div>
+                        <div className="bg-red-500/5 p-5 rounded-2xl border border-red-500/10 flex justify-between items-center">
+                          <div>
+                            <p className="text-[10px] font-bold text-red-400 uppercase mb-1 tracking-widest">Soma Paradas Não Programadas (Q)</p>
+                            <p className="text-2xl font-black text-white">{results.Q.toFixed(2)}<span className="text-xs ml-1 text-slate-500">h</span></p>
+                          </div>
+                          <AlertTriangle size={24} className="text-red-500/30" />
+                        </div>
+                      </div>
                     </div>
                   </InputGroup>
                 </div>
               </div>
 
-              <div className="mt-8 flex justify-end">
+              <div className="mt-8 flex flex-col sm:flex-row justify-end gap-4">
+                <button 
+                  onClick={saveRecord}
+                  disabled={isSaving}
+                  className="bg-emerald-600 text-white px-8 py-4 rounded-2xl font-bold shadow-lg shadow-emerald-500/20 hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {isSaving ? <RefreshCw size={20} className="animate-spin" /> : <Box size={20} />}
+                  {isSaving ? 'Salvando...' : 'Salvar Registro no Banco'}
+                </button>
                 <button 
                   onClick={() => setActiveTab('dashboard')}
-                  className="bg-blue-600 text-white px-10 py-4 rounded-2xl font-bold shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-all flex items-center gap-2 group"
+                  className="bg-blue-600 text-white px-10 py-4 rounded-2xl font-bold shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-all flex items-center justify-center gap-2 group"
                 >
                   Calcular e Ver Dashboard
                   <ChevronRight size={20} className="group-hover:translate-x-1 transition-transform" />
                 </button>
               </div>
             </motion.div>
-          )}
+          ) : null}
         </AnimatePresence>
       </main>
     </div>
+    </ErrorBoundary>
   );
 }
 
