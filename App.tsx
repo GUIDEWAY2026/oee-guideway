@@ -227,7 +227,7 @@ export default function App() {
     try {
       const { data, error } = await supabase
         .from('oee_records')
-        .select('*')
+        .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
         .order('created_at', { ascending: false })
         .limit(1);
 
@@ -308,7 +308,7 @@ export default function App() {
     try {
       let query = supabase
         .from('oee_records')
-        .select('*')
+        .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
         .order('created_at', { ascending: false });
       
       if (lineFilter !== 'Todas') {
@@ -512,7 +512,7 @@ export default function App() {
 
       const { data, error } = await supabase
         .from('oee_records')
-        .select('*')
+        .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
         .eq('machine_name', dashboardLine)
         .gte('created_at', startDate)
         .lte('created_at', endDate)
