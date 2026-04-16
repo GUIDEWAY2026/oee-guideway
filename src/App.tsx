@@ -38,7 +38,8 @@ import {
   Box,
   Cpu,
   Search,
-  ArrowRight
+  ArrowRight,
+  Hash
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
@@ -87,12 +88,56 @@ class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasErr
   }
 }
 
+// Custom Tooltip for OEE Evolution Chart
+const CustomOEEEvolutionTooltip = ({ active, payload, label }: any) => {
+  if (active && payload && payload.length) {
+    const oee = payload[0].value;
+    const color = oee >= 85 ? '#10b981' : oee >= 65 ? '#3b82f6' : '#ef4444';
+    return (
+      <div className="bg-zinc-900 border border-white/10 p-3 rounded-xl shadow-xl">
+        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">
+          {new Date(label).toLocaleString('pt-BR')}
+        </p>
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+          <p className="text-sm font-bold" style={{ color }}>
+            OEE: {oee.toFixed(1)}%
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return null;
+};
+
 // Types for our OEE data
 interface StopEntry {
   id: string;
   code: number;
-  duration: number; // minutos
+  startTime: string; // HH:mm
+  endTime: string;   // HH:mm
+  duration: number;  // minutos (calculado)
 }
+
+// Helper to calculate duration in minutes between two HH:mm strings
+const calculateDurationMinutes = (start: string, end: string): number => {
+  if (!start || !end) return 0;
+  
+  const [startH, startM] = start.split(':').map(Number);
+  const [endH, endM] = end.split(':').map(Number);
+  
+  if (isNaN(startH) || isNaN(startM) || isNaN(endH) || isNaN(endM)) return 0;
+  
+  let startTotal = startH * 60 + startM;
+  let endTotal = endH * 60 + endM;
+  
+  // Handle overnight stops (e.g., 23:00 to 01:00)
+  if (endTotal < startTotal) {
+    endTotal += 24 * 60;
+  }
+  
+  return endTotal - startTotal;
+};
 
 interface OEEInputs {
   date: string; // Data do Relatório
@@ -106,6 +151,10 @@ interface OEEInputs {
   K: number; // Turnos de Produção
   stops: StopEntry[]; // Paradas detalhadas
   U: number; // Perda por Qualidade (garrafas)
+  shiftStartTime: string; // HORA INÍCIO DO TURNO
+  shiftEndTime: string;   // HORA DO TÉRMINO DO TURNO
+  initialCounter: number; // CONTADOR INICIAL
+  finalCounter: number;   // CONTADOR FINAL
 }
 
 const STOP_CODES = [
@@ -178,6 +227,7 @@ const MAIN_ADMIN_EMAIL = 'josemarcelolustosa@gmail.com';
 export default function App() {
   // Auth State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -200,7 +250,11 @@ export default function App() {
       H: 10000,
       K: 2,
       stops: [],
-      U: 2500
+      U: 0,
+      shiftStartTime: '06:00',
+      shiftEndTime: '22:00',
+      initialCounter: 0,
+      finalCounter: 120000
     };
   });
 
@@ -219,6 +273,7 @@ export default function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lineFilter, setLineFilter] = useState<string>('Todas');
   const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
+  const [dateFilter, setDateFilter] = useState<string>('Todas');
 
   // Buscar o último registro geral para inicializar o Dashboard
   const fetchLatestRecord = async () => {
@@ -227,7 +282,7 @@ export default function App() {
     try {
       const { data, error } = await supabase
         .from('oee_records')
-        .select('*')
+        .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
         .order('created_at', { ascending: false })
         .limit(1);
 
@@ -308,18 +363,27 @@ export default function App() {
     try {
       let query = supabase
         .from('oee_records')
-        .select('*')
+        .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
         .order('created_at', { ascending: false });
       
       if (lineFilter !== 'Todas') {
         query = query.eq('machine_name', lineFilter);
       }
 
-      // Filtro de Mês
+      // Filtro de Mês e Data
       const year = parseInt(monthFilter.split('-')[0]);
       const month = parseInt(monthFilter.split('-')[1]);
-      const startDate = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
-      const endDate = new Date(year, month, 0, 23, 59, 59).toISOString();
+      
+      let startDate, endDate;
+      if (dateFilter !== 'Todas') {
+        const day = parseInt(dateFilter);
+        // Usar data local para o filtro
+        startDate = new Date(year, month - 1, day, 0, 0, 0).toISOString();
+        endDate = new Date(year, month - 1, day, 23, 59, 59).toISOString();
+      } else {
+        startDate = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
+        endDate = new Date(year, month, 0, 23, 59, 59).toISOString();
+      }
       
       query = query.gte('created_at', startDate).lte('created_at', endDate);
 
@@ -361,6 +425,13 @@ export default function App() {
   const saveRecord = async () => {
     setIsSaving(true);
     try {
+      // Incluímos o nome do operador e a data real de salvamento no JSON de inputs
+      const enrichedInputs = {
+        ...inputs,
+        operator_name: currentUser?.name || 'Sistema',
+        saved_at: new Date().toISOString()
+      };
+
       const record = {
         created_at: new Date(inputs.date + 'T12:00:00').toISOString(), // Usa a data selecionada pelo usuário
         machine_name: inputs.line,
@@ -372,7 +443,7 @@ export default function App() {
         shift: `Turnos: ${inputs.K}`,
         notes: `Produção Real: ${inputs.H}`,
         // Salvamos o objeto inputs completo em downtime_data para evitar erro de coluna inexistente
-        downtime_data: JSON.stringify(inputs)
+        downtime_data: JSON.stringify(enrichedInputs)
       };
 
       const { error } = await supabase
@@ -393,22 +464,53 @@ export default function App() {
 
   useEffect(() => {
     fetchHistory();
-  }, [lineFilter, monthFilter]);
+  }, [lineFilter, monthFilter, dateFilter]);
+
+  // Sincronizar Perda por Qualidade (U) com base na nova rotina de cálculo
+  useEffect(() => {
+    const totalGarrafasContador = inputs.finalCounter - inputs.initialCounter;
+    const totalGarrafasProducao = inputs.H * inputs.C;
+    
+    // Regra: Se os contadores não forem informados (valor 0), a perda é 0
+    const calculatedU = (inputs.initialCounter === 0 || inputs.finalCounter === 0)
+      ? 0
+      : Math.max(0, totalGarrafasContador - totalGarrafasProducao);
+    
+    if (inputs.U !== calculatedU) {
+      setInputs(prev => ({ ...prev, U: calculatedU }));
+    }
+  }, [inputs.initialCounter, inputs.finalCounter, inputs.H, inputs.C, inputs.U]);
 
   // Calculation logic based on the provided formulas
   const calculateOEEResults = (data: OEEInputs): OEEResults => {
-    const { A, B, C, D, H, K, U, stops = [] } = data;
+    const { A, B, C, D, H, K, initialCounter, finalCounter, stops = [] } = data;
+
+    // Nova rotina de cálculo para U (Perda por Qualidade)
+    // 1) Valor líquido das garrafas = Contador Final - Contador Inicial
+    const totalGarrafasContador = finalCounter - initialCounter;
+    // 2) Total de garrafas da produção = Produção Real (H) * Garrafas por Fardo (C)
+    const totalGarrafasProducao = H * C;
+    // 3) Perda por Qualidade (U) = Total Contador - Total Produção
+    // Regra: Se os contadores não forem informados (valor 0), a perda é 0
+    const U = (initialCounter === 0 || finalCounter === 0)
+      ? 0
+      : Math.max(0, totalGarrafasContador - totalGarrafasProducao);
 
     // Calcular N e Q a partir das paradas
-    const N = stops.filter(s => {
+    const processedStops = stops.map(s => ({
+      ...s,
+      calculatedDuration: s.startTime && s.endTime ? calculateDurationMinutes(s.startTime, s.endTime) : (Number(s.duration) || 0)
+    }));
+
+    const N = processedStops.filter(s => {
       const config = STOP_CODES.find(c => c.code === Number(s.code));
       return config?.category === 'P';
-    }).reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0) / 60;
+    }).reduce((acc, curr) => acc + (curr.calculatedDuration || 0), 0) / 60;
 
-    const Q = stops.filter(s => {
+    const Q = processedStops.filter(s => {
       const config = STOP_CODES.find(c => c.code === Number(s.code));
       return config?.category === 'NP';
-    }).reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0) / 60;
+    }).reduce((acc, curr) => acc + (curr.calculatedDuration || 0), 0) / 60;
 
     // F = D * (B/100)
     const F = D * (B / 100);
@@ -512,7 +614,7 @@ export default function App() {
 
       const { data, error } = await supabase
         .from('oee_records')
-        .select('*')
+        .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
         .eq('machine_name', dashboardLine)
         .gte('created_at', startDate)
         .lte('created_at', endDate)
@@ -559,6 +661,7 @@ export default function App() {
       - Linha: ${inputs.line}
       - Produto (SKU): ${inputs.sku}
       - Data: ${inputs.date}
+      - Horário do Turno: ${inputs.shiftStartTime} às ${inputs.shiftEndTime}
       
       MÉTRICAS PRINCIPAIS:
       - OEE Global: ${results.oee.toFixed(1)}%
@@ -570,7 +673,7 @@ export default function App() {
       - Produção Real: ${inputs.H} fardos
       - Produção Teórica: ${results.G.toFixed(1)} fardos
       - Paradas Não Programadas: ${results.Q.toFixed(1)}h
-      - Perda por Qualidade: ${inputs.U} garrafas
+      - Perda por Qualidade: ${inputs.U} garrafas (Calculada via Contador: ${inputs.initialCounter} -> ${inputs.finalCounter})
       - Redução de Velocidade (Perda de Performance): ${results.S.toFixed(1)}h
       
       GUIA DE CALIBRAÇÃO DE TOM (REFERÊNCIA):
@@ -824,7 +927,7 @@ export default function App() {
         return;
       }
       setInputs(prev => ({ ...prev, [key]: value }));
-    } else if (key === 'sku' || key === 'line') {
+    } else if (key === 'sku' || key === 'line' || key === 'shiftStartTime' || key === 'shiftEndTime') {
       setInputs(prev => ({ ...prev, [key]: value }));
     } else {
       const numValue = parseFloat(value) || 0;
@@ -1584,9 +1687,29 @@ export default function App() {
                     <input 
                       type="month"
                       value={monthFilter}
-                      onChange={(e) => setMonthFilter(e.target.value)}
+                      onChange={(e) => {
+                        setMonthFilter(e.target.value);
+                        setDateFilter('Todas'); // Resetar data ao mudar o mês
+                      }}
                       className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer"
                     />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Data</span>
+                    <select 
+                      value={dateFilter}
+                      onChange={(e) => setDateFilter(e.target.value)}
+                      className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer min-w-[100px]"
+                    >
+                      <option value="Todas">Todas</option>
+                      {Array.from({ 
+                        length: new Date(parseInt(monthFilter.split('-')[0]), parseInt(monthFilter.split('-')[1]), 0).getDate() 
+                      }, (_, i) => i + 1).map(day => (
+                        <option key={day} value={day.toString()}>
+                          Dia {day.toString().padStart(2, '0')}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                   <div className="flex flex-col gap-1">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Linha</span>
@@ -1635,9 +1758,7 @@ export default function App() {
                         tickLine={false}
                       />
                       <Tooltip 
-                        contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                        labelFormatter={(label) => new Date(label).toLocaleString('pt-BR')}
-                        formatter={(value: number) => [value.toFixed(1) + '%', 'OEE']}
+                        content={<CustomOEEEvolutionTooltip />}
                       />
                       <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
                         {history.map((entry, index) => (
@@ -1682,6 +1803,7 @@ export default function App() {
                         />
                         <Tooltip 
                           contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                          itemStyle={{ color: '#fff' }}
                           formatter={(value: number) => [value + ' min', 'Duração']}
                         />
                         <Bar dataKey="duration" fill="#ef4444" radius={[4, 4, 0, 0]}>
@@ -1720,6 +1842,7 @@ export default function App() {
                         />
                         <Tooltip 
                           contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                          itemStyle={{ color: '#fff' }}
                           formatter={(value: number) => [value + ' min', 'Duração']}
                         />
                         <Bar dataKey="duration" fill="#3b82f6" radius={[4, 4, 0, 0]}>
@@ -1779,6 +1902,9 @@ export default function App() {
                         <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
                         <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
                         <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Início</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Término</th>
+                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perda U</th>
                         <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
                         <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
                         <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
@@ -1805,6 +1931,30 @@ export default function App() {
                             </td>
                             <td className="px-8 py-4 text-xs font-bold text-white">{record.machine_name}</td>
                             <td className="px-8 py-4 text-xs text-slate-400">{record.sku}</td>
+                            <td className="px-8 py-4 text-center text-xs text-slate-400">
+                              {(() => {
+                                try {
+                                  const d = JSON.parse(record.downtime_data);
+                                  return d.shiftStartTime || '-';
+                                } catch(e) { return '-'; }
+                              })()}
+                            </td>
+                            <td className="px-8 py-4 text-center text-xs text-slate-400">
+                              {(() => {
+                                try {
+                                  const d = JSON.parse(record.downtime_data);
+                                  return d.shiftEndTime || '-';
+                                } catch(e) { return '-'; }
+                              })()}
+                            </td>
+                            <td className="px-8 py-4 text-center text-xs text-slate-400">
+                              {(() => {
+                                try {
+                                  const d = JSON.parse(record.downtime_data);
+                                  return d.U?.toLocaleString() || '0';
+                                } catch(e) { return '0'; }
+                              })()}
+                            </td>
                             <td className="px-8 py-4 text-center text-xs text-slate-300">{record.availability.toFixed(1)}%</td>
                             <td className="px-8 py-4 text-center text-xs text-slate-300">{record.performance.toFixed(1)}%</td>
                             <td className="px-8 py-4 text-center text-xs text-slate-300">{record.quality.toFixed(1)}%</td>
@@ -1817,15 +1967,24 @@ export default function App() {
                               </span>
                             </td>
                             <td className="px-8 py-4 text-right">
-                              {currentUser.isAdmin && (
+                              <div className="flex items-center justify-end gap-2">
                                 <button 
-                                  onClick={() => deleteRecord(record.id)}
-                                  className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                                  title="Excluir Registro"
+                                  onClick={() => setSelectedRecord(record)}
+                                  className="p-2 text-slate-500 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                  title="Visualizar Detalhes"
                                 >
-                                  <Trash2 size={16} />
+                                  <Search size={16} />
                                 </button>
-                              )}
+                                {currentUser.isAdmin && (
+                                  <button 
+                                    onClick={() => deleteRecord(record.id)}
+                                    className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                    title="Excluir Registro"
+                                  >
+                                    <Trash2 size={16} />
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         ))
@@ -1923,6 +2082,36 @@ export default function App() {
                   </InputGroup>
 
                   <InputGroup title="Resultados de Turno">
+                    <div className="grid grid-cols-2 gap-4 col-span-2">
+                      <InputField 
+                        label="Hora Início Turno" 
+                        value={inputs.shiftStartTime} 
+                        onChange={(v) => handleInputChange('shiftStartTime', v)} 
+                        icon={<Clock size={16} />}
+                        type="time"
+                      />
+                      <InputField 
+                        label="Hora Término Turno" 
+                        value={inputs.shiftEndTime} 
+                        onChange={(v) => handleInputChange('shiftEndTime', v)} 
+                        icon={<Clock size={16} />}
+                        type="time"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 col-span-2">
+                      <InputField 
+                        label="Contador Inicial" 
+                        value={inputs.initialCounter} 
+                        onChange={(v) => handleInputChange('initialCounter', v)} 
+                        icon={<Hash size={16} />}
+                      />
+                      <InputField 
+                        label="Contador Final" 
+                        value={inputs.finalCounter} 
+                        onChange={(v) => handleInputChange('finalCounter', v)} 
+                        icon={<Hash size={16} />}
+                      />
+                    </div>
                     <InputField 
                       label="H - Produção Real (fardos)" 
                       value={inputs.H} 
@@ -1935,12 +2124,25 @@ export default function App() {
                       onChange={(v) => handleInputChange('K', v)} 
                       icon={<Clock size={16} />}
                     />
-                    <InputField 
-                      label="U - Perda por Qualidade (garrafas)" 
-                      value={inputs.U} 
-                      onChange={(v) => handleInputChange('U', v)} 
-                      icon={<AlertTriangle size={16} />}
-                    />
+                    <div className="col-span-2 bg-blue-500/5 border border-blue-500/20 rounded-2xl p-4 mt-2">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">U - Perda por Qualidade (Calculada)</span>
+                        <AlertTriangle size={14} className="text-blue-400" />
+                      </div>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-2xl font-black text-white">
+                          {(inputs.initialCounter === 0 || inputs.finalCounter === 0) 
+                            ? 0 
+                            : Math.max(0, (inputs.finalCounter - inputs.initialCounter) - (inputs.H * inputs.C)).toLocaleString()}
+                        </span>
+                        <span className="text-xs font-bold text-slate-500 uppercase">Garrafas</span>
+                      </div>
+                      <p className="text-[9px] text-slate-500 mt-1 italic">
+                        {inputs.initialCounter === 0 || inputs.finalCounter === 0 
+                          ? "Informe os contadores para calcular a perda." 
+                          : "Cálculo: (Cont. Final - Cont. Inicial) - (Prod. Real * Fator Conv.)"}
+                      </p>
+                    </div>
                   </InputGroup>
 
                   <InputGroup title="Registro de Paradas (Conforme Formulário)" fullWidth>
@@ -1971,8 +2173,8 @@ export default function App() {
                               <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
                                 {index + 1}
                               </div>
-                              <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div>
+                              <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-4">
+                                <div className="md:col-span-2">
                                   <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
                                   <select 
                                     value={stop.code}
@@ -1989,20 +2191,38 @@ export default function App() {
                                   </select>
                                 </div>
                                 <div>
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Duração (Minutos)</label>
+                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Início</label>
+                                  <input 
+                                    type="time"
+                                    value={stop.startTime || ''}
+                                    onChange={(e) => {
+                                      const newStops = [...inputs.stops];
+                                      newStops[index].startTime = e.target.value;
+                                      newStops[index].duration = calculateDurationMinutes(e.target.value, newStops[index].endTime);
+                                      setInputs(prev => ({ ...prev, stops: newStops }));
+                                    }}
+                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Término</label>
                                   <div className="relative">
                                     <input 
-                                      type="number"
-                                      value={stop.duration}
+                                      type="time"
+                                      value={stop.endTime || ''}
                                       onChange={(e) => {
                                         const newStops = [...inputs.stops];
-                                        newStops[index].duration = parseFloat(e.target.value) || 0;
+                                        newStops[index].endTime = e.target.value;
+                                        newStops[index].duration = calculateDurationMinutes(newStops[index].startTime, e.target.value);
                                         setInputs(prev => ({ ...prev, stops: newStops }));
                                       }}
-                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all pr-12"
-                                      placeholder="0"
+                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
                                     />
-                                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-500 uppercase">min</span>
+                                    {stop.duration > 0 && (
+                                      <div className="absolute -bottom-5 right-0 text-[9px] font-bold text-blue-400 uppercase">
+                                        {stop.duration} min
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -2025,6 +2245,8 @@ export default function App() {
                           const newStop: StopEntry = {
                             id: crypto.randomUUID(),
                             code: 1,
+                            startTime: '',
+                            endTime: '',
                             duration: 0
                           };
                           setInputs(prev => ({ ...prev, stops: [...prev.stops, newStop] }));
@@ -2076,9 +2298,175 @@ export default function App() {
             </motion.div>
           ) : null}
         </AnimatePresence>
+
+        <AnimatePresence>
+          {selectedRecord && (
+            <RecordDetailModal 
+              record={selectedRecord} 
+              onClose={() => setSelectedRecord(null)} 
+            />
+          )}
+        </AnimatePresence>
       </main>
     </div>
     </ErrorBoundary>
+  );
+}
+
+function RecordDetailModal({ record, onClose }: { record: any, onClose: () => void }) {
+  const data = useMemo(() => {
+    try {
+      return JSON.parse(record.downtime_data);
+    } catch (e) {
+      return null;
+    }
+  }, [record]);
+
+  if (!data) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="bg-zinc-900 w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl border border-white/10 shadow-2xl"
+      >
+        {/* Modal Header */}
+        <div className="sticky top-0 z-10 bg-zinc-900/80 backdrop-blur-md px-8 py-6 border-b border-white/10 flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+              <Search className="text-blue-400" />
+              Detalhes do Registro
+            </h2>
+            <p className="text-xs text-slate-400 mt-1">
+              ID: {record.id} • {new Date(record.created_at).toLocaleDateString('pt-BR')}
+            </p>
+          </div>
+          <button 
+            onClick={onClose}
+            className="p-2 hover:bg-white/5 rounded-xl text-slate-400 transition-colors"
+          >
+            <LogOut size={20} />
+          </button>
+        </div>
+
+        {/* Modal Content */}
+        <div className="p-8 space-y-8">
+          {/* Info Header */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Operador</p>
+              <p className="text-sm font-bold text-white">{data.operator_name || 'Não registrado'}</p>
+            </div>
+            <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Data de Salvamento</p>
+              <p className="text-sm font-bold text-white">
+                {data.saved_at ? new Date(data.saved_at).toLocaleString('pt-BR') : 'Não registrado'}
+              </p>
+            </div>
+            <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Linha / Máquina</p>
+              <p className="text-sm font-bold text-white">{record.machine_name}</p>
+            </div>
+          </div>
+
+          {/* OEE Results */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-blue-500/10 p-4 rounded-2xl border border-blue-500/20">
+              <p className="text-[10px] font-bold text-blue-400 uppercase mb-1">Disponibilidade</p>
+              <p className="text-xl font-black text-white">{record.availability.toFixed(1)}%</p>
+            </div>
+            <div className="bg-orange-500/10 p-4 rounded-2xl border border-orange-500/20">
+              <p className="text-[10px] font-bold text-orange-400 uppercase mb-1">Performance</p>
+              <p className="text-xl font-black text-white">{record.performance.toFixed(1)}%</p>
+            </div>
+            <div className="bg-emerald-500/10 p-4 rounded-2xl border border-emerald-500/20">
+              <p className="text-[10px] font-bold text-emerald-400 uppercase mb-1">Qualidade</p>
+              <p className="text-xl font-black text-white">{record.quality.toFixed(1)}%</p>
+            </div>
+            <div className="bg-indigo-600 p-4 rounded-2xl shadow-lg shadow-indigo-500/20">
+              <p className="text-[10px] font-bold text-indigo-100 uppercase mb-1">OEE Score</p>
+              <p className="text-xl font-black text-white">{record.oee_score.toFixed(1)}%</p>
+            </div>
+          </div>
+
+          {/* Detailed Inputs */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className="space-y-4">
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest border-b border-white/5 pb-2">Dados de Produção</h4>
+              <div className="grid grid-cols-2 gap-4">
+                <StatRow label="Tempo Total (A)" value={data.A?.toString() || '0'} unit="h" />
+                <StatRow label="% Projeto (B)" value={data.B?.toString() || '0'} unit="%" />
+                <StatRow label="Fator Conv. (C)" value={data.C?.toString() || '0'} unit="G/F" />
+                <StatRow label="Vel. Nominal (D)" value={data.D?.toString() || '0'} unit="GPH" />
+                <StatRow label="Prod. Real (H)" value={data.H?.toString() || '0'} unit="Fardos" />
+                <StatRow label="Turnos (K)" value={data.K?.toString() || '0'} unit="Qtd" />
+                <StatRow label="Início Turno" value={data.shiftStartTime || '-'} unit="" />
+                <StatRow label="Término Turno" value={data.shiftEndTime || '-'} unit="" />
+                <StatRow label="Cont. Inicial" value={data.initialCounter?.toString() || '0'} unit="" />
+                <StatRow label="Cont. Final" value={data.finalCounter?.toString() || '0'} unit="" />
+                <StatRow label="Perda Qual. (U)" value={data.U?.toString() || '0'} unit="Garr." />
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest border-b border-white/5 pb-2">Informações Adicionais</h4>
+              <div className="bg-white/5 p-4 rounded-2xl border border-white/10 min-h-[100px]">
+                <p className="text-[10px] font-bold text-slate-500 uppercase mb-2">Observações / Notas</p>
+                <p className="text-sm text-slate-300 italic">{record.notes || 'Sem observações'}</p>
+                <p className="text-sm text-slate-300 mt-2">{record.shift}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Stops Table */}
+          <div className="space-y-4">
+            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest border-b border-white/5 pb-2">Detalhamento de Paradas</h4>
+            <div className="bg-white/5 rounded-2xl border border-white/10 overflow-hidden">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="bg-white/5 border-b border-white/10">
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase">Código</th>
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase">Descrição</th>
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase">Início</th>
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase">Término</th>
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase text-right">Duração (min)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {data.stops && data.stops.length > 0 ? (
+                    data.stops.map((stop: any, idx: number) => {
+                      const stopInfo = STOP_CODES.find(s => s.code === stop.code);
+                      return (
+                        <tr key={idx} className="hover:bg-white/5 transition-colors">
+                          <td className="px-6 py-3 font-mono text-blue-400">{stop.code}</td>
+                          <td className="px-6 py-3 text-slate-300">
+                            <div className="flex flex-col">
+                              <span>{stopInfo?.description || 'Desconhecido'}</span>
+                              <span className={`text-[9px] font-bold ${stopInfo?.category === 'P' ? 'text-blue-400' : 'text-red-400'}`}>
+                                {stopInfo?.category === 'P' ? 'Programada' : 'Não Programada'}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-3 text-slate-400">{stop.startTime || '-'}</td>
+                          <td className="px-6 py-3 text-slate-400">{stop.endTime || '-'}</td>
+                          <td className="px-6 py-3 text-right font-bold text-white">{stop.duration} min</td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={4} className="px-6 py-8 text-center text-slate-500 italic">Nenhuma parada registrada.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </div>
   );
 }
 
