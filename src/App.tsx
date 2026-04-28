@@ -157,7 +157,13 @@ interface OEEInputs {
   finalCounter: number;   // CONTADOR FINAL
 }
 
-const STOP_CODES = [
+interface StopCode {
+  code: number;
+  description: string;
+  category: 'P' | 'NP';
+}
+
+const DEFAULT_STOP_CODES: StopCode[] = [
   { code: 1, description: 'Problema no RINSER', category: 'NP' },
   { code: 2, description: 'Problema na ENCHEDORA', category: 'NP' },
   { code: 3, description: 'Problema no ROSQUEADOR', category: 'NP' },
@@ -168,6 +174,8 @@ const STOP_CODES = [
   { code: 31, description: 'SOPRADORA', category: 'NP' },
   { code: 32, description: 'ROTULADORA', category: 'NP' },
   { code: 33, description: 'EMPACOTADORA', category: 'NP' },
+  { code: 34, description: 'TROCA DE RÓTULO (Rótulo)', category: 'NP' },
+  { code: 35, description: 'TROCA DE BOBINA DE FILME (Empacotadora)', category: 'NP' },
   { code: 41, description: 'FALTA DE ÁGUA', category: 'NP' },
   { code: 42, description: 'FALTA DE ENERGIA', category: 'NP' },
   { code: 43, description: 'FALTA DE AR COMPRIMIDO', category: 'NP' },
@@ -208,6 +216,7 @@ interface OEEResults {
   performance: number;
   qualidade: number;
   oee: number;
+  maintenanceIndex: number;
 }
 
 // Types for Authentication
@@ -232,8 +241,13 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [showAdminPanel, setShowAdminPanel] = useState(false);
+  const [adminTab, setAdminTab] = useState<'users' | 'stops'>('users');
   const [users, setUsers] = useState<User[]>([]);
+  const [stopCodes, setStopCodes] = useState<StopCode[]>(DEFAULT_STOP_CODES);
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+  const [isLoadingStops, setIsLoadingStops] = useState(false);
+  const [editingStop, setEditingStop] = useState<StopCode | null>(null);
+  const [newStop, setNewStop] = useState<Partial<StopCode>>({ category: 'NP' });
 
   // Initial state based on the provided example image
   const [inputs, setInputs] = useState<OEEInputs>(() => {
@@ -351,11 +365,82 @@ export default function App() {
     }
   };
 
+  const fetchStopCodes = async () => {
+    setIsLoadingStops(true);
+    try {
+      const { data, error } = await supabase
+        .from('stop_codes')
+        .select('*')
+        .order('code', { ascending: true });
+      
+      if (error) {
+        if (error.code === 'PGRST116' || error.message.includes('relation "stop_codes" does not exist')) {
+          console.warn('Tabela stop_codes não existe. Usando defaults.');
+          return;
+        }
+        throw error;
+      }
+      
+      if (data && data.length > 0) {
+        setStopCodes(data.map(s => ({
+          code: s.code,
+          description: s.description,
+          category: s.category
+        })));
+      } else {
+        // Se a tabela estiver vazia, tentar popular com os defaults
+        console.log('Tabela stop_codes vazia. Populando com defaults...');
+        await supabase.from('stop_codes').insert(DEFAULT_STOP_CODES);
+        setStopCodes(DEFAULT_STOP_CODES);
+      }
+    } catch (error: any) {
+      console.error('Erro ao buscar códigos de parada:', error);
+    } finally {
+      setIsLoadingStops(false);
+    }
+  };
+
+  const saveStopCode = async (stop: StopCode) => {
+    try {
+      const { error } = await supabase
+        .from('stop_codes')
+        .upsert([stop]);
+      
+      if (error) throw error;
+      fetchStopCodes();
+      setEditingStop(null);
+    } catch (error: any) {
+      console.error('Erro ao salvar código de parada:', error);
+      alert('Erro ao salvar: ' + error.message);
+    }
+  };
+
+  const deleteStopCode = async (code: number) => {
+    if (!confirm('Tem certeza que deseja excluir este código de parada?')) return;
+    try {
+      const { error } = await supabase
+        .from('stop_codes')
+        .delete()
+        .eq('code', code);
+      
+      if (error) throw error;
+      fetchStopCodes();
+    } catch (error: any) {
+      console.error('Erro ao excluir código de parada:', error);
+      alert('Erro ao excluir: ' + error.message);
+    }
+  };
+
   useEffect(() => {
     if (showAdminPanel) {
       fetchUsers();
+      fetchStopCodes();
     }
   }, [showAdminPanel]);
+
+  useEffect(() => {
+    fetchStopCodes(); // Carrega paradas logo no início para garantir que o inputs funcione
+  }, []);
 
   // Carregar histórico do Supabase
   const fetchHistory = async () => {
@@ -482,7 +567,7 @@ export default function App() {
   }, [inputs.initialCounter, inputs.finalCounter, inputs.H, inputs.C, inputs.U]);
 
   // Calculation logic based on the provided formulas
-  const calculateOEEResults = (data: OEEInputs): OEEResults => {
+  const calculateOEEResults = (data: OEEInputs, currentStopCodes: StopCode[]): OEEResults => {
     const { A, B, C, D, H, K, initialCounter, finalCounter, stops = [] } = data;
 
     // Nova rotina de cálculo para U (Perda por Qualidade)
@@ -503,12 +588,12 @@ export default function App() {
     }));
 
     const N = processedStops.filter(s => {
-      const config = STOP_CODES.find(c => c.code === Number(s.code));
+      const config = currentStopCodes.find(c => c.code === Number(s.code));
       return config?.category === 'P';
     }).reduce((acc, curr) => acc + (curr.calculatedDuration || 0), 0) / 60;
 
     const Q = processedStops.filter(s => {
-      const config = STOP_CODES.find(c => c.code === Number(s.code));
+      const config = currentStopCodes.find(c => c.code === Number(s.code));
       return config?.category === 'NP';
     }).reduce((acc, curr) => acc + (curr.calculatedDuration || 0), 0) / 60;
 
@@ -553,18 +638,25 @@ export default function App() {
     const qualidade = T > 0 ? X / T : 0;
     const oee = disponibilidade * performance * qualidade;
 
+    const maintenanceDowntime = processedStops.filter(s => 
+      [1, 2, 3, 31, 32, 33, 34, 35].includes(Number(s.code))
+    ).reduce((acc, curr) => acc + (curr.calculatedDuration || 0), 0) / 60;
+
+    const maintenanceIndex = P > 0 ? (maintenanceDowntime / P) * 100 : 0;
+
     return {
       F, G, I, L, M, O, P, R, S, T, V, X, N, Q,
       disponibilidade: Math.max(0, disponibilidade * 100),
       performance: Math.max(0, performance * 100),
       qualidade: Math.max(0, qualidade * 100),
-      oee: Math.max(0, oee * 100)
+      oee: Math.max(0, oee * 100),
+      maintenanceIndex: Math.max(0, maintenanceIndex)
     };
   };
 
   const results = useMemo((): OEEResults => {
-    return calculateOEEResults(inputs);
-  }, [inputs]);
+    return calculateOEEResults(inputs, stopCodes);
+  }, [inputs, stopCodes]);
 
   const dashboardData = useMemo(() => {
     if (!dashboardRecord) return null;
@@ -581,7 +673,7 @@ export default function App() {
       // Verifica se é o formato completo (objeto inputs)
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'A' in parsed) {
         const inputs = parsed as OEEInputs;
-        const results = calculateOEEResults(inputs);
+        const results = calculateOEEResults(inputs, stopCodes);
         return { inputs, results };
       }
     } catch (e) {
@@ -720,7 +812,17 @@ export default function App() {
   };
 
   const consolidatedMetrics = useMemo(() => {
-    if (history.length === 0) return { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0, paretoNP: [], paretoP: [] };
+    if (history.length === 0) {
+      return { 
+        oee: 0, 
+        disponibilidade: 0, 
+        performance: 0, 
+        qualidade: 0, 
+        maintenanceIndex: 0,
+        paretoNP: [], 
+        paretoP: [] 
+      };
+    }
     
     const sum = history.reduce((acc, curr) => ({
       oee: acc.oee + curr.oee_score,
@@ -729,8 +831,11 @@ export default function App() {
       qualidade: acc.qualidade + curr.quality,
     }), { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0 });
 
-    // Consolidar dados para o Pareto
+    // Consolidar dados para o Pareto e Índice de Quebra
     const stopsMap: { [key: number]: number } = {};
+    let totalMaintenanceMinutes = 0;
+    let totalProgrammedHours = 0;
+
     history.forEach(record => {
       if (record.downtime_data) {
         try {
@@ -742,6 +847,18 @@ export default function App() {
           // Se for o formato antigo (array), usamos diretamente
           const stops: StopEntry[] = Array.isArray(parsed) ? parsed : (parsed.stops || []);
           
+          // Tenta calcular o tempo programado e quebras se for o formato novo
+          if (!Array.isArray(parsed) && parsed.A !== undefined) {
+            const res = calculateOEEResults(parsed as OEEInputs, stopCodes);
+            totalProgrammedHours += res.P;
+            
+            const maintenanceMins = stops
+              .filter(s => [1, 2, 3, 31, 32, 33, 34, 35].includes(Number(s.code)))
+              .reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0);
+            
+            totalMaintenanceMinutes += maintenanceMins;
+          }
+
           stops.forEach(stop => {
             stopsMap[stop.code] = (stopsMap[stop.code] || 0) + stop.duration;
           });
@@ -751,9 +868,11 @@ export default function App() {
       }
     });
 
+    const maintenanceIndex = totalProgrammedHours > 0 ? (totalMaintenanceMinutes / 60 / totalProgrammedHours) * 100 : 0;
+
     const allPareto = Object.entries(stopsMap)
       .map(([code, duration]) => {
-        const config = STOP_CODES.find(c => c.code === parseInt(code));
+        const config = stopCodes.find(c => c.code === parseInt(code));
         return {
           name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
           duration,
@@ -770,10 +889,11 @@ export default function App() {
       disponibilidade: sum.disponibilidade / history.length,
       performance: sum.performance / history.length,
       qualidade: sum.qualidade / history.length,
+      maintenanceIndex,
       paretoNP,
       paretoP
     };
-  }, [history]);
+  }, [history, stopCodes]);
 
   const currentParetoData = useMemo(() => {
     const stopsMap: { [key: number]: number } = {};
@@ -784,7 +904,7 @@ export default function App() {
 
     const allPareto = Object.entries(stopsMap)
       .map(([code, duration]) => {
-        const config = STOP_CODES.find(c => c.code === Number(code));
+        const config = stopCodes.find(c => c.code === Number(code));
         return {
           name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
           duration,
@@ -797,7 +917,7 @@ export default function App() {
       np: allPareto.filter(item => item.category === 'NP'),
       p: allPareto.filter(item => item.category === 'P')
     };
-  }, [inputs.stops]);
+  }, [inputs.stops, stopCodes]);
 
   const chartData = [
     { name: 'TEMPO TOTAL', value: inputs.A, color: '#7e22ce' },
@@ -1263,16 +1383,38 @@ export default function App() {
             >
               <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                 <div>
-                  <h2 className="text-3xl font-bold tracking-tight text-white">Gestão de Acessos</h2>
-                  <p className="text-slate-400 mt-1">Controle de usuários e permissões do sistema.</p>
+                  <h2 className="text-3xl font-bold tracking-tight text-white">Painel Administrativo</h2>
+                  <p className="text-slate-400 mt-1">Configurações globais e gestão de dados.</p>
+                </div>
+                <div className="flex bg-zinc-900 border border-white/10 p-1 rounded-2xl">
+                  <button 
+                    onClick={() => setAdminTab('users')}
+                    className={`px-6 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'users' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    Usuários
+                  </button>
+                  <button 
+                    onClick={() => setAdminTab('stops')}
+                    className={`px-6 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'stops' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    Tabela de Paradas
+                  </button>
                 </div>
               </header>
 
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <div className="lg:col-span-1">
-                  <div className="bg-zinc-900 border border-white/10 rounded-3xl p-8">
-                    <h3 className="text-lg font-bold text-white mb-6">Novo Usuário</h3>
-                    <form onSubmit={handleCreateUser} className="space-y-5">
+              <AnimatePresence mode="wait">
+                {adminTab === 'users' ? (
+                  <motion.div 
+                    key="users-tab"
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 20 }}
+                    className="grid grid-cols-1 lg:grid-cols-3 gap-8"
+                  >
+                    <div className="lg:col-span-1">
+                      <div className="bg-zinc-900 border border-white/10 rounded-3xl p-8">
+                        <h3 className="text-lg font-bold text-white mb-6">Novo Usuário</h3>
+                        <form onSubmit={handleCreateUser} className="space-y-5">
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Nome Completo</label>
                         <input 
@@ -1387,7 +1529,150 @@ export default function App() {
                   </table>
                 </div>
               </div>
-              </div>
+            </motion.div>
+          ) : (
+                  <motion.div 
+                    key="stops-tab"
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -20 }}
+                    className="grid grid-cols-1 lg:grid-cols-3 gap-8"
+                  >
+                    <div className="lg:col-span-1">
+                      <div className="bg-zinc-900 border border-white/10 rounded-3xl p-8">
+                        <h3 className="text-lg font-bold text-white mb-6">
+                          {editingStop ? 'Editar Código' : 'Novo Código de Parada'}
+                        </h3>
+                        <div className="space-y-5">
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Código (Número)</label>
+                            <input 
+                              type="number" 
+                              value={editingStop ? editingStop.code : (newStop.code || '')}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value);
+                                if (editingStop) setEditingStop({...editingStop, code: val});
+                                else setNewStop({...newStop, code: val});
+                              }}
+                              className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                              placeholder="Ex: 501"
+                              disabled={!!editingStop}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Descrição</label>
+                            <input 
+                              type="text" 
+                              value={editingStop ? editingStop.description : (newStop.description || '')}
+                              onChange={(e) => {
+                                if (editingStop) setEditingStop({...editingStop, description: e.target.value});
+                                else setNewStop({...newStop, description: e.target.value});
+                              }}
+                              className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                              placeholder="Descrição da parada"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Categoria</label>
+                            <select 
+                              value={editingStop ? editingStop.category : (newStop.category || 'NP')}
+                              onChange={(e) => {
+                                const val = e.target.value as 'P' | 'NP';
+                                if (editingStop) setEditingStop({...editingStop, category: val});
+                                else setNewStop({...newStop, category: val});
+                              }}
+                              className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 appearance-none bg-zinc-800"
+                            >
+                              <option value="NP">Não Programada (NP)</option>
+                              <option value="P">Programada (P)</option>
+                            </select>
+                          </div>
+                          <div className="flex gap-4">
+                            <button 
+                              onClick={() => {
+                                if (editingStop) saveStopCode(editingStop);
+                                else if (newStop.code && newStop.description) saveStopCode(newStop as StopCode);
+                              }}
+                              className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-2xl transition-all"
+                            >
+                              {editingStop ? 'SALVAR' : 'CADASTRAR'}
+                            </button>
+                            {editingStop && (
+                              <button 
+                                onClick={() => setEditingStop(null)}
+                                className="px-6 bg-zinc-800 hover:bg-zinc-700 text-white font-bold py-4 rounded-2xl transition-all"
+                              >
+                                X
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="lg:col-span-2">
+                      <div className="bg-zinc-900 border border-white/10 rounded-3xl overflow-hidden">
+                        <div className="px-8 py-5 bg-white/5 border-b border-white/10 flex justify-between items-center">
+                          <h3 className="text-sm font-bold text-white uppercase tracking-widest">Tabela de Paradas Revisada</h3>
+                          <button 
+                            onClick={fetchStopCodes}
+                            className="p-2 text-slate-400 hover:text-white transition-colors"
+                          >
+                            <RefreshCw size={16} className={isLoadingStops ? 'animate-spin' : ''} />
+                          </button>
+                        </div>
+                        <div className="max-h-[600px] overflow-y-auto">
+                          <table className="w-full text-left">
+                            <thead className="sticky top-0 bg-zinc-900 z-10">
+                              <tr className="bg-white/5 border-b border-white/10">
+                                <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest w-24">Código</th>
+                                <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Descrição</th>
+                                <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest w-32">Categoria</th>
+                                <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/10">
+                              {isLoadingStops ? (
+                                <tr>
+                                  <td colSpan={4} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                                    Sincronizando banco de dados...
+                                  </td>
+                                </tr>
+                              ) : stopCodes.map((stop) => (
+                                <tr key={stop.code} className="hover:bg-white/5 transition-colors group">
+                                  <td className="px-8 py-5 text-sm font-mono font-bold text-blue-400">{stop.code}</td>
+                                  <td className="px-8 py-5 text-sm text-slate-300">{stop.description}</td>
+                                  <td className="px-8 py-5">
+                                    <span className={`text-[9px] font-black uppercase px-2 py-1 rounded ${stop.category === 'P' ? 'bg-blue-500/10 text-blue-400' : 'bg-red-500/10 text-red-400'}`}>
+                                      {stop.category === 'P' ? 'Programada' : 'Não Prog.'}
+                                    </span>
+                                  </td>
+                                  <td className="px-8 py-5 text-right">
+                                    <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                      <button 
+                                        onClick={() => setEditingStop(stop)}
+                                        className="text-slate-400 hover:text-blue-400 transition-colors p-1"
+                                      >
+                                        <Settings size={16} />
+                                      </button>
+                                      <button 
+                                        onClick={() => deleteStopCode(stop.code)}
+                                        className="text-slate-600 hover:text-red-400 transition-colors p-1"
+                                      >
+                                        <Trash2 size={16} />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
           ) : activeTab === 'dashboard' ? (
             <motion.div 
@@ -1576,8 +1861,16 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
-                        <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Análise de Perdas</h3>
+                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm relative overflow-hidden">
+                        <div className="flex justify-between items-start mb-4">
+                          <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest">Análise de Perdas</h3>
+                          <div className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter border ${
+                            dashboardRecord.oee_score >= 85 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 
+                            dashboardRecord.oee_score >= 65 ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'
+                          }`}>
+                            {dashboardRecord.oee_score >= 85 ? 'Classe Mundial' : dashboardRecord.oee_score >= 65 ? 'Aceitável' : 'Crítico'}
+                          </div>
+                        </div>
                         <div className="space-y-4">
                           <StatRow label="Redução Velocidade" value={formatNumber(dashboardData.results.S)} unit="h" color="text-orange-400" />
                           <StatRow label="Perda Qualidade" value={formatNumber(dashboardData.results.V)} unit="h" color="text-red-400" />
@@ -1585,22 +1878,28 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="bg-zinc-800 rounded-3xl p-6 text-white shadow-xl overflow-hidden relative border border-white/5">
+                      <div className="bg-zinc-800 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col justify-center">
                         <div className="relative z-10">
-                          <h3 className="font-bold text-[10px] opacity-50 uppercase tracking-widest mb-2">Status Operacional</h3>
-                          <p className="text-2xl font-bold mb-4">
-                            {dashboardRecord.oee_score >= 85 ? 'Classe Mundial' : dashboardRecord.oee_score >= 65 ? 'Aceitável' : 'Crítico'}
-                          </p>
-                          <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
-                            <motion.div 
-                              initial={{ width: 0 }}
-                              animate={{ width: `${dashboardRecord.oee_score}%` }}
-                              transition={{ duration: 1, ease: "easeOut" }}
-                              className={`h-full ${dashboardRecord.oee_score >= 85 ? 'bg-emerald-400' : dashboardRecord.oee_score >= 65 ? 'bg-blue-400' : 'bg-red-400'}`}
-                            />
+                          <div className="flex items-center gap-3 mb-6">
+                            <div className="p-2.5 bg-red-500/20 rounded-xl">
+                              <Cpu size={18} className="text-red-400" />
+                            </div>
+                            <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">Índice de Quebra (%)</h3>
                           </div>
+                          <div className="flex items-center gap-4 mb-2">
+                            <p className="text-5xl font-black tracking-tighter">
+                              {dashboardData.results.maintenanceIndex.toFixed(1)}%
+                            </p>
+                            <div className={`flex items-center gap-1.5 text-xs font-bold px-2 py-1 rounded-lg ${dashboardData.results.maintenanceIndex < 5 ? 'text-emerald-400 bg-emerald-500/10' : 'text-red-400 bg-red-500/10'}`}>
+                              {dashboardData.results.maintenanceIndex < 5 ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+                              {dashboardData.results.maintenanceIndex < 5 ? 'Sob Controle' : 'Atenção'}
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider leading-relaxed">
+                            KPI de Manutenção <br/> (Total Quebras / Tempo Prog.)
+                          </p>
                         </div>
-                        <Activity className="absolute -right-4 -bottom-4 opacity-[0.03]" size={120} />
+                        <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.05] group-hover:scale-110 transition-transform" size={180} />
                       </div>
                     </div>
                   )}
@@ -1734,271 +2033,321 @@ export default function App() {
                 </div>
               </header>
 
-              {/* Gráfico de Evolução */}
-              <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
-                <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
-                  <BarChart3 size={20} className="text-indigo-400" />
-                  Tendência de OEE Global (%)
-                </h3>
-                <div className="h-[300px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={[...history].reverse()}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                      <XAxis 
-                        dataKey="created_at" 
-                        tickFormatter={(str) => new Date(str).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
-                        tick={{ fontSize: 10, fill: '#94a3b8' }}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <YAxis 
-                        domain={[0, 100]}
-                        tick={{ fontSize: 10, fill: '#94a3b8' }}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <Tooltip 
-                        content={<CustomOEEEvolutionTooltip />}
-                      />
-                      <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
-                        {history.map((entry, index) => (
-                          <Cell 
-                            key={`cell-${index}`} 
-                            fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
-                          />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
+              {history.length > 0 ? (
+                <>
+                  {/* Gráfico de Evolução e Índice de Quebra Consolidado */}
+                  <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+                    <div className="lg:col-span-3 bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
+                      <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
+                        <BarChart3 size={20} className="text-indigo-400" />
+                        Tendência de OEE Global (%)
+                      </h3>
+                      <div className="h-[300px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={[...history].reverse()}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                            <XAxis 
+                              dataKey="created_at" 
+                              tickFormatter={(str) => new Date(str).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <YAxis 
+                              domain={[0, 100]}
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <Tooltip 
+                              content={<CustomOEEEvolutionTooltip />}
+                            />
+                            <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
+                              {history.map((entry, index) => (
+                                <Cell 
+                                  key={`cell-${index}`} 
+                                  fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
+                                />
+                              ))}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
 
-              {/* Gráfico de Pareto de Paradas */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
-                  <h3 className="font-bold text-lg flex items-center gap-2 text-red-400 mb-8">
-                    <AlertTriangle size={20} />
-                    Pareto Não Programadas (Minutos Acumulados)
-                  </h3>
-                  <div className="h-[400px] w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart 
-                        data={consolidatedMetrics.paretoNP}
-                        margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                        <XAxis 
-                          dataKey="name" 
-                          tick={{ fontSize: 10, fill: '#94a3b8' }}
-                          interval={0}
-                          angle={-45}
-                          textAnchor="end"
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <YAxis 
-                          tick={{ fontSize: 10, fill: '#94a3b8' }}
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                          itemStyle={{ color: '#fff' }}
-                          formatter={(value: number) => [value + ' min', 'Duração']}
-                        />
-                        <Bar dataKey="duration" fill="#ef4444" radius={[4, 4, 0, 0]}>
-                          <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                    <div className="lg:col-span-1 bg-zinc-800 rounded-3xl p-8 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col justify-center">
+                      <div className="relative z-10">
+                        <div className="flex items-center gap-2 mb-4">
+                          <div className="p-2 bg-red-500/20 rounded-xl">
+                            <Cpu size={18} className="text-red-400" />
+                          </div>
+                          <h3 className="font-bold text-[10px] text-slate-300 uppercase tracking-widest">Índice de Quebra Médio (%)</h3>
+                        </div>
+                        <div className="flex items-baseline gap-2 mb-2">
+                          <p className="text-4xl font-black tracking-tighter">
+                            {consolidatedMetrics.maintenanceIndex.toFixed(1)}%
+                          </p>
+                        </div>
+                        <div className={`flex items-center gap-1.5 text-xs font-bold mb-6 ${consolidatedMetrics.maintenanceIndex < 5 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {consolidatedMetrics.maintenanceIndex < 5 ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+                          {consolidatedMetrics.maintenanceIndex < 5 ? 'Status: Sob Controle' : 'Status: Atenção'}
+                        </div>
+                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider leading-relaxed">
+                          Média acumulada do período: <br/> Total Quebras / Tempo Programado
+                        </p>
+                      </div>
+                      <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.05] group-hover:scale-110 transition-transform" size={180} />
+                    </div>
                   </div>
-                </div>
 
-                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
-                  <h3 className="font-bold text-lg flex items-center gap-2 text-blue-400 mb-8">
-                    <Clock size={20} />
-                    Pareto Programadas (Minutos Acumulados)
-                  </h3>
-                  <div className="h-[400px] w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart 
-                        data={consolidatedMetrics.paretoP}
-                        margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                        <XAxis 
-                          dataKey="name" 
-                          tick={{ fontSize: 10, fill: '#94a3b8' }}
-                          interval={0}
-                          angle={-45}
-                          textAnchor="end"
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <YAxis 
-                          tick={{ fontSize: 10, fill: '#94a3b8' }}
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                          itemStyle={{ color: '#fff' }}
-                          formatter={(value: number) => [value + ' min', 'Duração']}
-                        />
-                        <Bar dataKey="duration" fill="#3b82f6" radius={[4, 4, 0, 0]}>
-                          <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                  {/* Gráfico de Pareto de Paradas */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                      <h3 className="font-bold text-lg flex items-center gap-2 text-red-400 mb-8">
+                        <AlertTriangle size={20} />
+                        Pareto Não Programadas (Minutos Acumulados)
+                      </h3>
+                      <div className="h-[400px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart 
+                            data={consolidatedMetrics.paretoNP}
+                            margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                            <XAxis 
+                              dataKey="name" 
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              interval={0}
+                              angle={-45}
+                              textAnchor="end"
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <YAxis 
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <Tooltip 
+                              contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                              itemStyle={{ color: '#fff' }}
+                              formatter={(value: number) => [value + ' min', 'Duração']}
+                            />
+                            <Bar dataKey="duration" fill="#ef4444" radius={[4, 4, 0, 0]}>
+                              <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                      <h3 className="font-bold text-lg flex items-center gap-2 text-blue-400 mb-8">
+                        <Clock size={20} />
+                        Pareto Programadas (Minutos Acumulados)
+                      </h3>
+                      <div className="h-[400px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart 
+                            data={consolidatedMetrics.paretoP}
+                            margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                            <XAxis 
+                              dataKey="name" 
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              interval={0}
+                              angle={-45}
+                              textAnchor="end"
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <YAxis 
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <Tooltip 
+                              contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                              itemStyle={{ color: '#fff' }}
+                              formatter={(value: number) => [value + ' min', 'Duração']}
+                            />
+                            <Bar dataKey="duration" fill="#3b82f6" radius={[4, 4, 0, 0]}>
+                              <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
 
-              {/* KPI Cards Consolidados */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                <KPICard 
-                  title="Disponibilidade Média" 
-                  value={consolidatedMetrics.disponibilidade} 
-                  icon={<Clock className="text-blue-400" />} 
-                  color="blue"
-                  description="Média do período filtrado"
-                />
-                <KPICard 
-                  title="Performance Média" 
-                  value={consolidatedMetrics.performance} 
-                  icon={<TrendingUp className="text-orange-400" />} 
-                  color="orange"
-                  description="Média do período filtrado"
-                />
-                <KPICard 
-                  title="Qualidade Média" 
-                  value={consolidatedMetrics.qualidade} 
-                  icon={<CheckCircle2 className="text-emerald-400" />} 
-                  color="emerald"
-                  description="Média do período filtrado"
-                />
-                <KPICard 
-                  title="OEE Global Médio" 
-                  value={consolidatedMetrics.oee} 
-                  icon={<Gauge className="text-indigo-400" />} 
-                  color="indigo"
-                  isMain
-                  description="Média do período filtrado"
-                />
-              </div>
+                  {/* KPI Cards Consolidados */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <KPICard 
+                      title="Disponibilidade Média" 
+                      value={consolidatedMetrics.disponibilidade} 
+                      icon={<Clock className="text-blue-400" />} 
+                      color="blue"
+                      description="Média do período filtrado"
+                    />
+                    <KPICard 
+                      title="Performance Média" 
+                      value={consolidatedMetrics.performance} 
+                      icon={<TrendingUp className="text-orange-400" />} 
+                      color="orange"
+                      description="Média do período filtrado"
+                    />
+                    <KPICard 
+                      title="Qualidade Média" 
+                      value={consolidatedMetrics.qualidade} 
+                      icon={<CheckCircle2 className="text-emerald-400" />} 
+                      color="emerald"
+                      description="Média do período filtrado"
+                    />
+                    <KPICard 
+                      title="OEE Global Médio" 
+                      value={consolidatedMetrics.oee} 
+                      icon={<Gauge className="text-indigo-400" />} 
+                      color="indigo"
+                      isMain
+                      description="Média do período filtrado"
+                    />
+                  </div>
 
-              {/* Histórico Recente Section */}
-              <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
-                <div className="px-8 py-5 bg-white/5 border-b border-white/10">
-                  <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
-                    <Clock size={16} className="text-blue-400" />
-                    Registros Detalhados
-                  </h3>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left">
-                    <thead>
-                      <tr className="bg-white/5 border-b border-white/10">
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Início</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Término</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perda U</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/10">
-                      {historyError ? (
-                        <tr>
-                          <td colSpan={8} className="px-8 py-10 text-center">
-                            <div className="flex flex-col items-center gap-2 text-red-400">
-                              <AlertTriangle size={24} />
-                              <p className="text-sm font-bold">Erro ao carregar histórico</p>
-                              <p className="text-[10px] opacity-70">{historyError}</p>
-                            </div>
-                          </td>
-                        </tr>
-                      ) : history.length > 0 ? (
-                        history.map((record) => (
-                          <tr key={record.id} className="hover:bg-white/5 transition-colors group">
-                            <td className="px-8 py-4 text-xs text-slate-400">
-                              {new Date(record.created_at).toLocaleString('pt-BR')}
-                            </td>
-                            <td className="px-8 py-4 text-xs font-bold text-white">{record.machine_name}</td>
-                            <td className="px-8 py-4 text-xs text-slate-400">{record.sku}</td>
-                            <td className="px-8 py-4 text-center text-xs text-slate-400">
-                              {(() => {
-                                try {
-                                  const d = JSON.parse(record.downtime_data);
-                                  return d.shiftStartTime || '-';
-                                } catch(e) { return '-'; }
-                              })()}
-                            </td>
-                            <td className="px-8 py-4 text-center text-xs text-slate-400">
-                              {(() => {
-                                try {
-                                  const d = JSON.parse(record.downtime_data);
-                                  return d.shiftEndTime || '-';
-                                } catch(e) { return '-'; }
-                              })()}
-                            </td>
-                            <td className="px-8 py-4 text-center text-xs text-slate-400">
-                              {(() => {
-                                try {
-                                  const d = JSON.parse(record.downtime_data);
-                                  return d.U?.toLocaleString() || '0';
-                                } catch(e) { return '0'; }
-                              })()}
-                            </td>
-                            <td className="px-8 py-4 text-center text-xs text-slate-300">{record.availability.toFixed(1)}%</td>
-                            <td className="px-8 py-4 text-center text-xs text-slate-300">{record.performance.toFixed(1)}%</td>
-                            <td className="px-8 py-4 text-center text-xs text-slate-300">{record.quality.toFixed(1)}%</td>
-                            <td className="px-8 py-4 text-center">
-                              <span className={`text-xs font-bold px-2 py-1 rounded ${
-                                record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
-                                record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
-                              }`}>
-                                {record.oee_score.toFixed(1)}%
-                              </span>
-                            </td>
-                            <td className="px-8 py-4 text-right">
-                              <div className="flex items-center justify-end gap-2">
-                                <button 
-                                  onClick={() => setSelectedRecord(record)}
-                                  className="p-2 text-slate-500 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                                  title="Visualizar Detalhes"
-                                >
-                                  <Search size={16} />
-                                </button>
-                                {currentUser.isAdmin && (
-                                  <button 
-                                    onClick={() => deleteRecord(record.id)}
-                                    className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                                    title="Excluir Registro"
-                                  >
-                                    <Trash2 size={16} />
-                                  </button>
-                                )}
-                              </div>
-                            </td>
+                  {/* Histórico Recente Section */}
+                  <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
+                    <div className="px-8 py-5 bg-white/5 border-b border-white/10">
+                      <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
+                        <Clock size={16} className="text-blue-400" />
+                        Registros Detalhados
+                      </h3>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead>
+                          <tr className="bg-white/5 border-b border-white/10">
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Início</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Término</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perda U</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
+                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
                           </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan={8} className="px-8 py-10 text-center text-slate-500 text-sm italic">
-                            Nenhum registro encontrado para esta linha.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
+                        </thead>
+                        <tbody className="divide-y divide-white/10">
+                          {historyError ? (
+                            <tr>
+                              <td colSpan={8} className="px-8 py-10 text-center">
+                                <div className="flex flex-col items-center gap-2 text-red-400">
+                                  <AlertTriangle size={24} />
+                                  <p className="text-sm font-bold">Erro ao carregar histórico</p>
+                                  <p className="text-[10px] opacity-70">{historyError}</p>
+                                </div>
+                              </td>
+                            </tr>
+                          ) : history.length > 0 ? (
+                            history.map((record) => (
+                              <tr key={record.id} className="hover:bg-white/5 transition-colors group">
+                                <td className="px-8 py-4 text-xs text-slate-400">
+                                  {new Date(record.created_at).toLocaleString('pt-BR')}
+                                </td>
+                                <td className="px-8 py-4 text-xs font-bold text-white">{record.machine_name}</td>
+                                <td className="px-8 py-4 text-xs text-slate-400">{record.sku}</td>
+                                <td className="px-8 py-4 text-center text-xs text-slate-400">
+                                  {(() => {
+                                    try {
+                                      const d = JSON.parse(record.downtime_data);
+                                      return d.shiftStartTime || '-';
+                                    } catch(e) { return '-'; }
+                                  })()}
+                                </td>
+                                <td className="px-8 py-4 text-center text-xs text-slate-400">
+                                  {(() => {
+                                    try {
+                                      const d = JSON.parse(record.downtime_data);
+                                      return d.shiftEndTime || '-';
+                                    } catch(e) { return '-'; }
+                                  })()}
+                                </td>
+                                <td className="px-8 py-4 text-center text-xs text-slate-400">
+                                  {(() => {
+                                    try {
+                                      const d = JSON.parse(record.downtime_data);
+                                      return d.U?.toLocaleString() || '0';
+                                    } catch(e) { return '0'; }
+                                  })()}
+                                </td>
+                                <td className="px-8 py-4 text-center text-xs text-slate-300">{record.availability.toFixed(1)}%</td>
+                                <td className="px-8 py-4 text-center text-xs text-slate-300">{record.performance.toFixed(1)}%</td>
+                                <td className="px-8 py-4 text-center text-xs text-slate-300">{record.quality.toFixed(1)}%</td>
+                                <td className="px-8 py-4 text-center">
+                                  <span className={`text-xs font-bold px-2 py-1 rounded ${
+                                    record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
+                                    record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
+                                  }`}>
+                                    {record.oee_score.toFixed(1)}%
+                                  </span>
+                                </td>
+                                <td className="px-8 py-4 text-right">
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button 
+                                      onClick={() => setSelectedRecord(record)}
+                                      className="p-2 text-slate-500 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                      title="Visualizar Detalhes"
+                                    >
+                                      <Search size={16} />
+                                    </button>
+                                    {currentUser.isAdmin && (
+                                      <button 
+                                        onClick={() => deleteRecord(record.id)}
+                                        className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                        title="Excluir Registro"
+                                      >
+                                        <Trash2 size={16} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={11} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                                Nenhum registro encontrado para esta linha.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-20 bg-zinc-900/30 rounded-3xl border border-dashed border-white/10">
+                  <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-6">
+                    <Search size={32} className="text-slate-500" />
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">Nenhum dado encontrado</h3>
+                  <p className="text-slate-400 max-w-md text-center">
+                    Não encontramos registros de produção para os filtros selecionados.
+                  </p>
+                  <p className="text-slate-500 text-sm mt-1 text-center">
+                    Por favor, tente selecionar outra data, mês ou linha de produção.
+                  </p>
+                  <button 
+                    onClick={() => setActiveTab('inputs')}
+                    className="mt-8 text-blue-400 hover:text-blue-300 font-bold flex items-center gap-2 transition-colors"
+                  >
+                    Ir para Parâmetros/Inputs
+                    <ArrowRight size={16} />
+                  </button>
                 </div>
-              </div>
+              )}
             </motion.div>
           ) : activeTab === 'inputs' ? (
             <motion.div 
@@ -2162,7 +2511,7 @@ export default function App() {
 
                       <div className="space-y-3">
                         {inputs.stops.map((stop, index) => {
-                          const stopConfig = STOP_CODES.find(c => c.code === stop.code);
+                          const stopConfig = stopCodes.find(c => c.code === stop.code);
                           return (
                             <motion.div 
                               initial={{ opacity: 0, x: -10 }}
@@ -2185,7 +2534,7 @@ export default function App() {
                                     }}
                                     className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
                                   >
-                                    {STOP_CODES.map(c => (
+                                    {stopCodes.map(c => (
                                       <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
                                     ))}
                                   </select>
@@ -2303,6 +2652,7 @@ export default function App() {
           {selectedRecord && (
             <RecordDetailModal 
               record={selectedRecord} 
+              stopCodes={stopCodes}
               onClose={() => setSelectedRecord(null)} 
             />
           )}
@@ -2313,7 +2663,7 @@ export default function App() {
   );
 }
 
-function RecordDetailModal({ record, onClose }: { record: any, onClose: () => void }) {
+function RecordDetailModal({ record, stopCodes, onClose }: { record: any, stopCodes: StopCode[], onClose: () => void }) {
   const data = useMemo(() => {
     try {
       return JSON.parse(record.downtime_data);
@@ -2437,7 +2787,7 @@ function RecordDetailModal({ record, onClose }: { record: any, onClose: () => vo
                 <tbody className="divide-y divide-white/5">
                   {data.stops && data.stops.length > 0 ? (
                     data.stops.map((stop: any, idx: number) => {
-                      const stopInfo = STOP_CODES.find(s => s.code === stop.code);
+                      const stopInfo = stopCodes.find(s => s.code === stop.code);
                       return (
                         <tr key={idx} className="hover:bg-white/5 transition-colors">
                           <td className="px-6 py-3 font-mono text-blue-400">{stop.code}</td>
