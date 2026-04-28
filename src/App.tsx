@@ -39,7 +39,8 @@ import {
   Cpu,
   Search,
   ArrowRight,
-  Hash
+  Hash,
+  Pencil
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
@@ -284,6 +285,8 @@ export default function App() {
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lineFilter, setLineFilter] = useState<string>('Todas');
@@ -511,15 +514,21 @@ export default function App() {
   const saveRecord = async () => {
     setIsSaving(true);
     try {
+      const now = new Date().toISOString();
+      const editorName = currentUser?.name || 'Sistema';
+
       // Incluímos o nome do operador e a data real de salvamento no JSON de inputs
+      // Além de quem editou por último
       const enrichedInputs = {
         ...inputs,
-        operator_name: currentUser?.name || 'Sistema',
-        saved_at: new Date().toISOString()
+        operator_name: isEditing ? (inputs as any).operator_name : editorName,
+        saved_at: isEditing ? (inputs as any).saved_at : now,
+        last_edited_by: editorName,
+        last_edited_at: now
       };
 
       const record = {
-        created_at: new Date(inputs.date + 'T12:00:00').toISOString(), // Usa a data selecionada pelo usuário
+        created_at: isEditing ? (inputs as any).date_created_original || new Date(inputs.date + 'T12:00:00').toISOString() : new Date(inputs.date + 'T12:00:00').toISOString(),
         machine_name: inputs.line,
         sku: inputs.sku,
         availability: results.disponibilidade,
@@ -528,17 +537,29 @@ export default function App() {
         oee_score: results.oee,
         shift: `Turnos: ${inputs.K}`,
         notes: `Produção Real: ${inputs.H}`,
-        // Salvamos o objeto inputs completo em downtime_data para evitar erro de coluna inexistente
         downtime_data: JSON.stringify(enrichedInputs)
       };
 
-      const { error } = await supabase
-        .from('oee_records')
-        .insert([record]);
-
-      if (error) throw error;
+      if (isEditing && editingRecordId) {
+        const { error } = await supabase
+          .from('oee_records')
+          .update(record)
+          .eq('id', editingRecordId);
+        
+        if (error) throw error;
+        alert('Registro atualizado com sucesso!');
+      } else {
+        const { error } = await supabase
+          .from('oee_records')
+          .insert([record]);
+        
+        if (error) throw error;
+        alert('Registro salvo com sucesso!');
+      }
       
-      alert('Registro salvo com sucesso no banco de dados!');
+      // Resetar estados de edição
+      setIsEditing(false);
+      setEditingRecordId(null);
       fetchHistory(); // Atualiza a lista após salvar
     } catch (error: any) {
       console.error('Erro ao salvar registro:', error);
@@ -546,6 +567,37 @@ export default function App() {
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleEditRecord = (record: any) => {
+    try {
+      const sourceData = record.downtime_data;
+      if (!sourceData) return;
+
+      const parsed = typeof sourceData === 'string' 
+        ? JSON.parse(sourceData) 
+        : sourceData;
+      
+      if (parsed && typeof parsed === 'object') {
+        // Preserva a data original do registro para não sobrescrever o created_at indesejadamente
+        setInputs({
+          ...parsed,
+          date_created_original: record.created_at
+        });
+        setEditingRecordId(record.id);
+        setIsEditing(true);
+        setActiveTab('inputs');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    } catch (e) {
+      console.error("Erro ao carregar registro para edição:", e);
+      alert("Não foi possível carregar os dados detalhados deste registro para edição.");
+    }
+  };
+
+  const cancelEdit = () => {
+    setIsEditing(false);
+    setEditingRecordId(null);
   };
 
   useEffect(() => {
@@ -1494,11 +1546,11 @@ export default function App() {
                   <table className="w-full text-left">
                     <thead>
                       <tr className="bg-white/5 border-b border-white/10">
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Nome</th>
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">E-mail</th>
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Perfil</th>
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Senha</th>
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Nome</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">E-mail</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Perfil</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Senha</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/10">
@@ -1510,15 +1562,15 @@ export default function App() {
                         </tr>
                       ) : users.map((user) => (
                         <tr key={user.email} className="hover:bg-white/5 transition-colors">
-                          <td className="px-8 py-5 text-sm font-bold text-white">{user.name}</td>
-                          <td className="px-8 py-5 text-sm text-slate-400">{user.email}</td>
-                          <td className="px-8 py-5">
+                          <td className="px-4 py-3 text-sm font-bold text-white">{user.name}</td>
+                          <td className="px-4 py-3 text-sm text-slate-400">{user.email}</td>
+                          <td className="px-4 py-3">
                             <span className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-lg ${user.isAdmin ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-slate-400'}`}>
                               {user.isAdmin ? 'Admin' : 'Operador'}
                             </span>
                           </td>
-                          <td className="px-8 py-5 text-sm font-mono text-slate-500">{user.password}</td>
-                          <td className="px-8 py-5 text-right">
+                          <td className="px-4 py-3 text-sm font-mono text-slate-500">{user.password}</td>
+                          <td className="px-4 py-3 text-right">
                             <button 
                               onClick={() => handleDeleteUser(user.email)}
                               className="text-slate-600 hover:text-red-400 transition-colors p-2"
@@ -1635,10 +1687,10 @@ export default function App() {
                           <table className="w-full text-left">
                             <thead className="sticky top-0 bg-zinc-900 z-10">
                               <tr className="bg-white/5 border-b border-white/10">
-                                <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest w-24">Código</th>
-                                <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Descrição</th>
-                                <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest w-32">Categoria</th>
-                                <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest w-20">Código</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Descrição</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest w-24">Categoria</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-white/10">
@@ -1650,15 +1702,15 @@ export default function App() {
                                 </tr>
                               ) : stopCodes.map((stop) => (
                                 <tr key={stop.code} className="hover:bg-white/5 transition-colors group">
-                                  <td className="px-8 py-5 text-sm font-mono font-bold text-blue-400">{stop.code}</td>
-                                  <td className="px-8 py-5 text-sm text-slate-300">{stop.description}</td>
-                                  <td className="px-8 py-5">
+                                  <td className="px-4 py-3 text-sm font-mono font-bold text-blue-400">{stop.code}</td>
+                                  <td className="px-4 py-3 text-sm text-slate-300">{stop.description}</td>
+                                  <td className="px-4 py-3">
                                     <span className={`text-[9px] font-black uppercase px-2 py-1 rounded ${stop.category === 'P' ? 'bg-blue-500/10 text-blue-400' : 'bg-red-500/10 text-red-400'}`}>
                                       {stop.category === 'P' ? 'Programada' : 'Não Prog.'}
                                     </span>
                                   </td>
-                                  <td className="px-8 py-5 text-right">
-                                    <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <td className="px-4 py-3 text-right">
+                                    <div className="flex justify-end gap-2 opacity-100 transition-opacity">
                                       <button 
                                         onClick={() => setEditingStop(stop)}
                                         className="text-slate-400 hover:text-blue-400 transition-colors p-1"
@@ -2282,17 +2334,17 @@ export default function App() {
                       <table className="w-full text-left">
                         <thead>
                           <tr className="bg-white/5 border-b border-white/10">
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Início</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Término</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perda U</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
-                            <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Início</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Término</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perda U</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-white/10">
@@ -2309,12 +2361,12 @@ export default function App() {
                           ) : history.length > 0 ? (
                             history.map((record) => (
                               <tr key={record.id} className="hover:bg-white/5 transition-colors group">
-                                <td className="px-8 py-4 text-xs text-slate-400">
-                                  {new Date(record.created_at).toLocaleString('pt-BR')}
+                                <td className="px-3 py-3 text-[11px] text-slate-400 whitespace-nowrap">
+                                  {new Date(record.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
                                 </td>
-                                <td className="px-8 py-4 text-xs font-bold text-white">{record.machine_name}</td>
-                                <td className="px-8 py-4 text-xs text-slate-400">{record.sku}</td>
-                                <td className="px-8 py-4 text-center text-xs text-slate-400">
+                                <td className="px-3 py-3 text-[11px] font-bold text-white whitespace-nowrap">{record.machine_name}</td>
+                                <td className="px-3 py-3 text-[11px] text-slate-400 max-w-[120px] truncate" title={record.sku}>{record.sku}</td>
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-400">
                                   {(() => {
                                     try {
                                       const d = JSON.parse(record.downtime_data);
@@ -2322,7 +2374,7 @@ export default function App() {
                                     } catch(e) { return '-'; }
                                   })()}
                                 </td>
-                                <td className="px-8 py-4 text-center text-xs text-slate-400">
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-400">
                                   {(() => {
                                     try {
                                       const d = JSON.parse(record.downtime_data);
@@ -2330,7 +2382,7 @@ export default function App() {
                                     } catch(e) { return '-'; }
                                   })()}
                                 </td>
-                                <td className="px-8 py-4 text-center text-xs text-slate-400">
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-400">
                                   {(() => {
                                     try {
                                       const d = JSON.parse(record.downtime_data);
@@ -2338,33 +2390,40 @@ export default function App() {
                                     } catch(e) { return '0'; }
                                   })()}
                                 </td>
-                                <td className="px-8 py-4 text-center text-xs text-slate-300">{record.availability.toFixed(1)}%</td>
-                                <td className="px-8 py-4 text-center text-xs text-slate-300">{record.performance.toFixed(1)}%</td>
-                                <td className="px-8 py-4 text-center text-xs text-slate-300">{record.quality.toFixed(1)}%</td>
-                                <td className="px-8 py-4 text-center">
-                                  <span className={`text-xs font-bold px-2 py-1 rounded ${
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.availability.toFixed(1)}%</td>
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.performance.toFixed(1)}%</td>
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.quality.toFixed(1)}%</td>
+                                <td className="px-3 py-3 text-center">
+                                  <span className={`text-[11px] font-bold px-2 py-1 rounded ${
                                     record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
                                     record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
                                   }`}>
                                     {record.oee_score.toFixed(1)}%
                                   </span>
                                 </td>
-                                <td className="px-8 py-4 text-right">
-                                  <div className="flex items-center justify-end gap-2">
+                                <td className="px-3 py-3 text-right">
+                                  <div className="flex items-center justify-end gap-1">
+                                    <button 
+                                      onClick={() => handleEditRecord(record)}
+                                      className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-400/10 rounded-lg transition-all"
+                                      title="Corrigir Apontamento"
+                                    >
+                                      <Pencil size={14} />
+                                    </button>
                                     <button 
                                       onClick={() => setSelectedRecord(record)}
-                                      className="p-2 text-slate-500 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                      className="p-1.5 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
                                       title="Visualizar Detalhes"
                                     >
-                                      <Search size={16} />
+                                      <Search size={14} />
                                     </button>
                                     {currentUser.isAdmin && (
                                       <button 
                                         onClick={() => deleteRecord(record.id)}
-                                        className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                                        className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
                                         title="Excluir Registro"
                                       >
-                                        <Trash2 size={16} />
+                                        <Trash2 size={14} />
                                       </button>
                                     )}
                                   </div>
@@ -2413,12 +2472,41 @@ export default function App() {
               exit={{ opacity: 0, x: -20 }}
               className="max-w-4xl mx-auto"
             >
-              <header className="mb-8">
-                <h2 className="text-3xl font-bold tracking-tight text-white">Parâmetros de Entrada</h2>
-                <p className="text-slate-400 mt-1">Configure os dados base para o cálculo do OEE.</p>
+              <header className="mb-8 flex flex-col md:flex-row justify-between items-start gap-4">
+                <div>
+                  <h2 className="text-3xl font-bold tracking-tight text-white">
+                    {isEditing ? 'Correção de Apontamento' : 'Parâmetros de Entrada'}
+                  </h2>
+                  <p className="text-slate-400 mt-1">
+                    {isEditing ? 'Ajuste os dados do registro selecionado.' : 'Configure os dados base para o cálculo do OEE.'}
+                  </p>
+                </div>
+                {isEditing && (
+                  <button 
+                    onClick={cancelEdit}
+                    className="flex items-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all border border-white/10"
+                  >
+                    Cancelar Edição
+                  </button>
+                )}
               </header>
 
               <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
+                {isEditing && (
+                  <div className="bg-amber-600/10 border-b border-amber-600/20 px-8 py-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-amber-600 rounded-lg">
+                        <Pencil size={18} className="text-white" />
+                      </div>
+                      <div>
+                        <p className="text-amber-200 font-bold text-xs">Editando Registro Existente</p>
+                        <p className="text-amber-500/70 text-[10px] uppercase font-black tracking-widest mt-0.5">
+                          ID: {editingRecordId}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div className="p-8 border-b border-white/5">
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div>
@@ -2687,10 +2775,14 @@ export default function App() {
                 <button 
                   onClick={saveRecord}
                   disabled={isSaving}
-                  className="bg-emerald-600 text-white px-8 py-4 rounded-2xl font-bold shadow-lg shadow-emerald-500/20 hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  className={`${
+                    isEditing 
+                      ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-500/20' 
+                      : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'
+                  } text-white px-8 py-4 rounded-2xl font-bold shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50`}
                 >
-                  {isSaving ? <RefreshCw size={20} className="animate-spin" /> : <Box size={20} />}
-                  {isSaving ? 'Salvando...' : 'Salvar Registro no Banco'}
+                  {isSaving ? <RefreshCw size={20} className="animate-spin" /> : (isEditing ? <Pencil size={20} /> : <Box size={20} />)}
+                  {isSaving ? 'Salvando...' : (isEditing ? 'Atualizar Registro' : 'Salvar Registro no Banco')}
                 </button>
                 <button 
                   onClick={() => setActiveTab('dashboard')}
@@ -2762,11 +2854,11 @@ function RecordDetailModal({ record, stopCodes, onClose }: { record: any, stopCo
           {/* Info Header */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
-              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Operador</p>
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Operador Original</p>
               <p className="text-sm font-bold text-white">{data.operator_name || 'Não registrado'}</p>
             </div>
             <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
-              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Data de Salvamento</p>
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Data Original do Salvamento</p>
               <p className="text-sm font-bold text-white">
                 {data.saved_at ? new Date(data.saved_at).toLocaleString('pt-BR') : 'Não registrado'}
               </p>
@@ -2776,6 +2868,29 @@ function RecordDetailModal({ record, stopCodes, onClose }: { record: any, stopCo
               <p className="text-sm font-bold text-white">{record.machine_name}</p>
             </div>
           </div>
+
+          {/* Audit History (Optional if edited) */}
+          {data.last_edited_by && (
+            <div className="bg-amber-500/5 p-4 rounded-2xl border border-amber-500/20 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-amber-500/20 rounded-lg border border-amber-500/30">
+                  <Pencil size={14} className="text-amber-500" />
+                </div>
+                <div>
+                  <p className="text-amber-200 font-bold text-xs">Histórico: Correção Efetuada</p>
+                  <p className="text-amber-500/70 text-[10px] uppercase font-black tracking-widest leading-tight">
+                    Alterado por: <span className="text-amber-400">{data.last_edited_by}</span>
+                  </p>
+                </div>
+              </div>
+              <div className="md:text-right border-l md:border-l-0 md:border-t-0 border-amber-500/10 pl-4 md:pl-0">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Data da Última Edição</p>
+                <p className="text-xs font-bold text-amber-200/80">
+                  {new Date(data.last_edited_at).toLocaleString('pt-BR')}
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* OEE Results */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
