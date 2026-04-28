@@ -217,6 +217,7 @@ interface OEEResults {
   qualidade: number;
   oee: number;
   maintenanceIndex: number;
+  teep: number;
 }
 
 // Types for Authentication
@@ -643,6 +644,7 @@ export default function App() {
     ).reduce((acc, curr) => acc + (curr.calculatedDuration || 0), 0) / 60;
 
     const maintenanceIndex = P > 0 ? (maintenanceDowntime / P) * 100 : 0;
+    const teep = A > 0 ? (X / A) * 100 : 0;
 
     return {
       F, G, I, L, M, O, P, R, S, T, V, X, N, Q,
@@ -650,7 +652,8 @@ export default function App() {
       performance: Math.max(0, performance * 100),
       qualidade: Math.max(0, qualidade * 100),
       oee: Math.max(0, oee * 100),
-      maintenanceIndex: Math.max(0, maintenanceIndex)
+      maintenanceIndex: Math.max(0, maintenanceIndex),
+      teep: Math.max(0, teep)
     };
   };
 
@@ -829,12 +832,15 @@ export default function App() {
       disponibilidade: acc.disponibilidade + curr.availability,
       performance: acc.performance + curr.performance,
       qualidade: acc.qualidade + curr.quality,
-    }), { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0 });
+      teep: acc.teep + (curr.teep || 0)
+    }), { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0, teep: 0 });
 
     // Consolidar dados para o Pareto e Índice de Quebra
     const stopsMap: { [key: number]: number } = {};
     let totalMaintenanceMinutes = 0;
     let totalProgrammedHours = 0;
+    let computedTeepSum = 0;
+    let recordCountWithTeep = 0;
 
     history.forEach(record => {
       if (record.downtime_data) {
@@ -851,6 +857,8 @@ export default function App() {
           if (!Array.isArray(parsed) && parsed.A !== undefined) {
             const res = calculateOEEResults(parsed as OEEInputs, stopCodes);
             totalProgrammedHours += res.P;
+            computedTeepSum += res.teep;
+            recordCountWithTeep++;
             
             const maintenanceMins = stops
               .filter(s => [1, 2, 3, 31, 32, 33, 34, 35].includes(Number(s.code)))
@@ -869,6 +877,7 @@ export default function App() {
     });
 
     const maintenanceIndex = totalProgrammedHours > 0 ? (totalMaintenanceMinutes / 60 / totalProgrammedHours) * 100 : 0;
+    const avgTeep = recordCountWithTeep > 0 ? computedTeepSum / recordCountWithTeep : 0;
 
     const allPareto = Object.entries(stopsMap)
       .map(([code, duration]) => {
@@ -890,6 +899,7 @@ export default function App() {
       performance: sum.performance / history.length,
       qualidade: sum.qualidade / history.length,
       maintenanceIndex,
+      teep: avgTeep,
       paretoNP,
       paretoP
     };
@@ -1878,28 +1888,51 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="bg-zinc-800 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col justify-center">
-                        <div className="relative z-10">
-                          <div className="flex items-center gap-3 mb-6">
-                            <div className="p-2.5 bg-red-500/20 rounded-xl">
-                              <Cpu size={18} className="text-red-400" />
+                      <div className="bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[450px]">
+                        <div className="relative z-10 flex flex-col h-full">
+                          {/* Top Section: Índice de Quebra */}
+                          <div className="flex-1 flex flex-col">
+                            <div className="flex items-center gap-4 mb-6">
+                              <div className="w-12 h-12 bg-red-500/10 rounded-2xl flex items-center justify-center border border-red-500/20">
+                                <Cpu size={22} className="text-red-400" />
+                              </div>
+                              <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest leading-tight">
+                                Índice de Quebra<br />Médio (%)
+                              </h3>
                             </div>
-                            <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">Índice de Quebra (%)</h3>
+                            
+                            <div className="mb-4">
+                              <p className="text-6xl font-black tracking-tighter text-white">
+                                {dashboardData.results.maintenanceIndex.toFixed(1)}%
+                              </p>
+                            </div>
+
+                            <div className={`flex items-center gap-2 text-sm font-bold ${dashboardData.results.maintenanceIndex < 5 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {dashboardData.results.maintenanceIndex < 5 ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                              <span>Status: {dashboardData.results.maintenanceIndex < 5 ? 'Sob Controle' : 'Atenção'}</span>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-4 mb-2">
-                            <p className="text-5xl font-black tracking-tighter">
-                              {dashboardData.results.maintenanceIndex.toFixed(1)}%
+
+                          {/* Divider */}
+                          <div className="h-px bg-white/5 w-full my-8" />
+                          
+                          {/* Bottom Section: TEEP */}
+                          <div className="flex-1 flex flex-col">
+                            <div className="flex items-center gap-4 mb-4">
+                              <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center border border-indigo-500/20">
+                                <Gauge size={22} className="text-indigo-400" />
+                              </div>
+                              <div className="flex flex-col">
+                                <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">TEEP Médio</h3>
+                                <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Total Effective Equipment Performance</span>
+                              </div>
+                            </div>
+                            <p className="text-6xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-indigo-600">
+                              {dashboardData.results.teep.toFixed(1)}%
                             </p>
-                            <div className={`flex items-center gap-1.5 text-xs font-bold px-2 py-1 rounded-lg ${dashboardData.results.maintenanceIndex < 5 ? 'text-emerald-400 bg-emerald-500/10' : 'text-red-400 bg-red-500/10'}`}>
-                              {dashboardData.results.maintenanceIndex < 5 ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
-                              {dashboardData.results.maintenanceIndex < 5 ? 'Sob Controle' : 'Atenção'}
-                            </div>
                           </div>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider leading-relaxed">
-                            KPI de Manutenção <br/> (Total Quebras / Tempo Prog.)
-                          </p>
                         </div>
-                        <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.05] group-hover:scale-110 transition-transform" size={180} />
+                        <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.03] group-hover:scale-110 transition-all duration-700 blur-sm" size={240} />
                       </div>
                     </div>
                   )}
@@ -2042,7 +2075,7 @@ export default function App() {
                         <BarChart3 size={20} className="text-indigo-400" />
                         Tendência de OEE Global (%)
                       </h3>
-                      <div className="h-[300px] w-full">
+                      <div className="h-[400px] w-full">
                         <ResponsiveContainer width="100%" height="100%">
                           <BarChart data={[...history].reverse()}>
                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
@@ -2075,28 +2108,51 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="lg:col-span-1 bg-zinc-800 rounded-3xl p-8 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col justify-center">
-                      <div className="relative z-10">
-                        <div className="flex items-center gap-2 mb-4">
-                          <div className="p-2 bg-red-500/20 rounded-xl">
-                            <Cpu size={18} className="text-red-400" />
+                    <div className="lg:col-span-1 bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[450px]">
+                      <div className="relative z-10 flex flex-col h-full">
+                        {/* Top Section: Índice de Quebra */}
+                        <div className="flex-1 flex flex-col">
+                          <div className="flex items-center gap-4 mb-6">
+                            <div className="w-12 h-12 bg-red-500/10 rounded-2xl flex items-center justify-center border border-red-500/20">
+                              <Cpu size={22} className="text-red-400" />
+                            </div>
+                            <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest leading-tight">
+                              Índice de Quebra<br />Médio (%)
+                            </h3>
                           </div>
-                          <h3 className="font-bold text-[10px] text-slate-300 uppercase tracking-widest">Índice de Quebra Médio (%)</h3>
+                          
+                          <div className="mb-4">
+                            <p className="text-6xl font-black tracking-tighter text-white">
+                              {consolidatedMetrics.maintenanceIndex.toFixed(1)}%
+                            </p>
+                          </div>
+
+                          <div className={`flex items-center gap-2 text-sm font-bold ${consolidatedMetrics.maintenanceIndex < 5 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {consolidatedMetrics.maintenanceIndex < 5 ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                            <span>Status: {consolidatedMetrics.maintenanceIndex < 5 ? 'Sob Controle' : 'Atenção'}</span>
+                          </div>
                         </div>
-                        <div className="flex items-baseline gap-2 mb-2">
-                          <p className="text-4xl font-black tracking-tighter">
-                            {consolidatedMetrics.maintenanceIndex.toFixed(1)}%
+
+                        {/* Divider */}
+                        <div className="h-px bg-white/5 w-full my-8" />
+                        
+                        {/* Bottom Section: TEEP */}
+                        <div className="flex-1 flex flex-col">
+                          <div className="flex items-center gap-4 mb-4">
+                            <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center border border-indigo-500/20">
+                              <Gauge size={22} className="text-indigo-400" />
+                            </div>
+                            <div className="flex flex-col">
+                              <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">TEEP Médio</h3>
+                              <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Total Effective Equipment Performance</span>
+                            </div>
+                          </div>
+                          <p className="text-6xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-indigo-600">
+                            {consolidatedMetrics.teep.toFixed(1)}%
                           </p>
                         </div>
-                        <div className={`flex items-center gap-1.5 text-xs font-bold mb-6 ${consolidatedMetrics.maintenanceIndex < 5 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {consolidatedMetrics.maintenanceIndex < 5 ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
-                          {consolidatedMetrics.maintenanceIndex < 5 ? 'Status: Sob Controle' : 'Status: Atenção'}
-                        </div>
-                        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider leading-relaxed">
-                          Média acumulada do período: <br/> Total Quebras / Tempo Programado
-                        </p>
                       </div>
-                      <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.05] group-hover:scale-110 transition-transform" size={180} />
+                      <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.03] group-hover:scale-110 transition-all duration-700 blur-sm" size={240} />
                     </div>
                   </div>
 
