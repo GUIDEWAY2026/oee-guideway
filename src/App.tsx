@@ -2148,7 +2148,7 @@ export default function App() {
                               content={<CustomOEEEvolutionTooltip />}
                             />
                             <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
-                              {history.map((entry, index) => (
+                              {[...history].reverse().map((entry, index) => (
                                 <Cell 
                                   key={`cell-${index}`} 
                                   fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
