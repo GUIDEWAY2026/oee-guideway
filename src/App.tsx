@@ -219,6 +219,7 @@ interface OEEResults {
   oee: number;
   maintenanceIndex: number;
   teep: number;
+  productivity: number;
 }
 
 // Types for Authentication
@@ -697,6 +698,7 @@ export default function App() {
 
     const maintenanceIndex = P > 0 ? (maintenanceDowntime / P) * 100 : 0;
     const teep = A > 0 ? (X / A) * 100 : 0;
+    const productivity = P > 0 ? (H / P) : 0;
 
     return {
       F, G, I, L, M, O, P, R, S, T, V, X, N, Q,
@@ -705,7 +707,8 @@ export default function App() {
       qualidade: Math.max(0, qualidade * 100),
       oee: Math.max(0, oee * 100),
       maintenanceIndex: Math.max(0, maintenanceIndex),
-      teep: Math.max(0, teep)
+      teep: Math.max(0, teep),
+      productivity: Math.max(0, productivity)
     };
   };
 
@@ -874,6 +877,8 @@ export default function App() {
         performance: 0, 
         qualidade: 0, 
         maintenanceIndex: 0,
+        teep: 0,
+        productivity: 0,
         paretoNP: [], 
         paretoP: [] 
       };
@@ -891,6 +896,7 @@ export default function App() {
     const stopsMap: { [key: number]: number } = {};
     let totalMaintenanceMinutes = 0;
     let totalProgrammedHours = 0;
+    let totalRealProduction = 0;
     let computedTeepSum = 0;
     let recordCountWithTeep = 0;
 
@@ -909,6 +915,7 @@ export default function App() {
           if (!Array.isArray(parsed) && parsed.A !== undefined) {
             const res = calculateOEEResults(parsed as OEEInputs, stopCodes);
             totalProgrammedHours += res.P;
+            totalRealProduction += Number(parsed.H) || 0;
             computedTeepSum += res.teep;
             recordCountWithTeep++;
             
@@ -930,6 +937,7 @@ export default function App() {
 
     const maintenanceIndex = totalProgrammedHours > 0 ? (totalMaintenanceMinutes / 60 / totalProgrammedHours) * 100 : 0;
     const avgTeep = recordCountWithTeep > 0 ? computedTeepSum / recordCountWithTeep : 0;
+    const avgProductivity = totalProgrammedHours > 0 ? (totalRealProduction / totalProgrammedHours) : 0;
 
     const allPareto = Object.entries(stopsMap)
       .map(([code, duration]) => {
@@ -952,6 +960,7 @@ export default function App() {
       qualidade: sum.qualidade / history.length,
       maintenanceIndex,
       teep: avgTeep,
+      productivity: avgProductivity,
       paretoNP,
       paretoP
     };
@@ -1940,8 +1949,8 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[450px]">
-                        <div className="relative z-10 flex flex-col h-full">
+                      <div className="bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[620px]">
+                        <div className="relative z-10 flex flex-col h-full gap-2">
                           {/* Top Section: Índice de Quebra */}
                           <div className="flex-1 flex flex-col">
                             <div className="flex items-center gap-4 mb-6">
@@ -1966,9 +1975,9 @@ export default function App() {
                           </div>
 
                           {/* Divider */}
-                          <div className="h-px bg-white/5 w-full my-8" />
+                          <div className="h-px bg-white/5 w-full my-6" />
                           
-                          {/* Bottom Section: TEEP */}
+                          {/* Middle Section: TEEP */}
                           <div className="flex-1 flex flex-col">
                             <div className="flex items-center gap-4 mb-4">
                               <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center border border-indigo-500/20">
@@ -1981,6 +1990,25 @@ export default function App() {
                             </div>
                             <p className="text-6xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-indigo-600">
                               {dashboardData.results.teep.toFixed(1)}%
+                            </p>
+                          </div>
+
+                          {/* Divider */}
+                          <div className="h-px bg-white/5 w-full my-6" />
+
+                          {/* Bottom Section: Produtividade */}
+                          <div className="flex-1 flex flex-col">
+                            <div className="flex items-center gap-4 mb-4">
+                              <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
+                                <TrendingUp size={22} className="text-emerald-400" />
+                              </div>
+                              <div className="flex flex-col">
+                                <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">Produtividade de Linha</h3>
+                                <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Produção Real / Tempo Programado</span>
+                              </div>
+                            </div>
+                            <p className="text-5xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-emerald-400 to-teal-500">
+                              {dashboardData.results.productivity.toFixed(1)} <span className="text-xs font-bold tracking-normal text-emerald-400/85">fardos/h</span>
                             </p>
                           </div>
                         </div>
@@ -2160,8 +2188,8 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="lg:col-span-1 bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[450px]">
-                      <div className="relative z-10 flex flex-col h-full">
+                    <div className="lg:col-span-1 bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[620px]">
+                      <div className="relative z-10 flex flex-col h-full gap-2">
                         {/* Top Section: Índice de Quebra */}
                         <div className="flex-1 flex flex-col">
                           <div className="flex items-center gap-4 mb-6">
@@ -2186,9 +2214,9 @@ export default function App() {
                         </div>
 
                         {/* Divider */}
-                        <div className="h-px bg-white/5 w-full my-8" />
+                        <div className="h-px bg-white/5 w-full my-6" />
                         
-                        {/* Bottom Section: TEEP */}
+                        {/* Middle Section: TEEP */}
                         <div className="flex-1 flex flex-col">
                           <div className="flex items-center gap-4 mb-4">
                             <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center border border-indigo-500/20">
@@ -2201,6 +2229,25 @@ export default function App() {
                           </div>
                           <p className="text-6xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-indigo-600">
                             {consolidatedMetrics.teep.toFixed(1)}%
+                          </p>
+                        </div>
+
+                        {/* Divider */}
+                        <div className="h-px bg-white/5 w-full my-6" />
+
+                        {/* Bottom Section: Produtividade */}
+                        <div className="flex-1 flex flex-col">
+                          <div className="flex items-center gap-4 mb-4">
+                            <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
+                              <TrendingUp size={22} className="text-emerald-400" />
+                            </div>
+                            <div className="flex flex-col">
+                              <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">Produtividade de Linhas</h3>
+                              <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Produção Real / Tempo Programado</span>
+                            </div>
+                          </div>
+                          <p className="text-5xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-emerald-400 to-teal-500">
+                            {consolidatedMetrics.productivity.toFixed(1)} <span className="text-xs font-bold tracking-normal text-emerald-400/85">fardos/h</span>
                           </p>
                         </div>
                       </div>
