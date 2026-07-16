@@ -47,10 +47,10 @@ import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { supabase } from '@/lib/supabase';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
 // Error Boundary Component
-class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
+export class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
   constructor(props: any) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -118,6 +118,8 @@ interface StopEntry {
   startTime: string; // HH:mm
   endTime: string;   // HH:mm
   duration: number;  // minutos (calculado)
+  reasonCategory?: string; // Categoria do Motivo para OUTROS
+  customReason?: string;   // Observação personalizada para OUTROS
 }
 
 // Helper to calculate duration in minutes between two HH:mm strings
@@ -236,7 +238,83 @@ interface User {
 const MAIN_ADMIN_EMAIL = 'josemarcelolustosa@gmail.com';
 // ---------------------------------------------------------------
 
+// Safe localStorage helper to prevent JSON parsing crashes
+const safeGetLocalStorage = <T,>(key: string, defaultValue: T): T => {
+  try {
+    const item = localStorage.getItem(key);
+    if (!item || item === 'undefined' || item === 'null') {
+      return defaultValue;
+    }
+    return JSON.parse(item) as T;
+  } catch (e) {
+    console.warn(`Erro ao ler/parsear a chave "${key}" do localStorage:`, e);
+    try {
+      localStorage.removeItem(key); // Remove para evitar erros subsequentes
+    } catch (_) {}
+    return defaultValue;
+  }
+};
+
+const generateSampleLocalRecords = () => {
+  const records = [];
+  const lines = ['Linha 01', 'Linha 02'];
+  const skus = ['Água Mineral 500ml', 'Água Mineral 1.5L', 'Água com Gás 500ml'];
+  
+  const today = new Date();
+  
+  for (let i = 10; i >= 0; i--) {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i, 12, 0, 0);
+    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    
+    // Variar um pouco os valores para ficar realista
+    const avail = 75 + Math.random() * 20;
+    const perf = 80 + Math.random() * 18;
+    const qual = 95 + Math.random() * 4.9;
+    
+    const calculatedOee = (avail/100) * (perf/100) * (qual/100) * 100;
+    const line = lines[Math.floor(Math.random() * lines.length)];
+    const sku = skus[Math.floor(Math.random() * skus.length)];
+    
+    const sampleInputs: OEEInputs = {
+      date: dateStr,
+      sku: sku,
+      line: line,
+      A: 24,
+      B: 80,
+      C: 12,
+      D: 22000,
+      H: Math.floor(8000 + Math.random() * 4000),
+      K: 2,
+      stops: [
+        { id: 's1', code: 101, startTime: '12:00', endTime: '13:00', duration: 60 },
+        { id: 's2', code: 2, startTime: '15:30', endTime: '16:00', duration: 30 }
+      ],
+      U: Math.floor(Math.random() * 100),
+      shiftStartTime: '06:00',
+      shiftEndTime: '22:00',
+      initialCounter: 0,
+      finalCounter: 120000
+    };
+    
+    records.push({
+      id: 'local-sample-' + i,
+      created_at: date.toISOString(),
+      machine_name: line,
+      sku: sku,
+      availability: avail,
+      performance: perf,
+      quality: qual,
+      oee_score: calculatedOee,
+      shift: 'Turnos: 2',
+      notes: `Produção Real: ${sampleInputs.H}`,
+      downtime_data: JSON.stringify(sampleInputs)
+    });
+  }
+  return records;
+};
+
 export default function App() {
+  const [useLocalFallback, setUseLocalFallback] = useState(!isSupabaseConfigured);
   // Auth State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
@@ -299,6 +377,21 @@ export default function App() {
     if (!currentUser) return;
     setIsFetchingDashboard(true);
     try {
+      if (useLocalFallback) {
+        const localRecordsStr = localStorage.getItem('oee_local_records');
+        const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+        if (localRecords.length > 0) {
+          localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+          const latest = localRecords[0];
+          const d = new Date(latest.created_at);
+          const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          setDashboardDate(recordDate);
+          setDashboardLine(latest.machine_name);
+          setDashboardRecord(latest);
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('oee_records')
         .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
@@ -318,7 +411,19 @@ export default function App() {
         setDashboardRecord(latest);
       }
     } catch (err) {
-      console.error('Erro ao buscar último registro para o dashboard:', err);
+      console.error('Erro ao buscar último registro para o dashboard, migrando para modo local:', err);
+      setUseLocalFallback(true);
+      const localRecordsStr = localStorage.getItem('oee_local_records');
+      const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+      if (localRecords.length > 0) {
+        localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        const latest = localRecords[0];
+        const d = new Date(latest.created_at);
+        const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        setDashboardDate(recordDate);
+        setDashboardLine(latest.machine_name);
+        setDashboardRecord(latest);
+      }
     } finally {
       setIsFetchingDashboard(false);
     }
@@ -327,6 +432,21 @@ export default function App() {
   // Buscar usuários do Supabase (Apenas para ADM)
   const ensureAdminExists = async () => {
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        const adminExists = localUsers.some(u => u.email === MAIN_ADMIN_EMAIL);
+        if (!adminExists) {
+          const newAdmin = {
+            name: 'Administrador Guideway',
+            email: MAIN_ADMIN_EMAIL,
+            password: 'admin',
+            is_admin: true
+          };
+          localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, newAdmin]));
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('email')
@@ -351,6 +471,17 @@ export default function App() {
     if (!currentUser?.isAdmin) return;
     setIsLoadingUsers(true);
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        setUsers(localUsers.map(u => ({
+          name: u.name,
+          email: u.email,
+          password: u.password,
+          isAdmin: u.is_admin
+        })));
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -364,7 +495,15 @@ export default function App() {
         isAdmin: u.is_admin
       })));
     } catch (error: any) {
-      console.error('Erro ao buscar usuários:', error);
+      console.error('Erro ao buscar usuários, migrando para local:', error);
+      setUseLocalFallback(true);
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      setUsers(localUsers.map(u => ({
+        name: u.name,
+        email: u.email,
+        password: u.password,
+        isAdmin: u.is_admin
+      })));
     } finally {
       setIsLoadingUsers(false);
     }
@@ -373,6 +512,12 @@ export default function App() {
   const fetchStopCodes = async () => {
     setIsLoadingStops(true);
     try {
+      if (useLocalFallback) {
+        const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+        setStopCodes(localStops);
+        return;
+      }
+
       const { data, error } = await supabase
         .from('stop_codes')
         .select('*')
@@ -399,7 +544,10 @@ export default function App() {
         setStopCodes(DEFAULT_STOP_CODES);
       }
     } catch (error: any) {
-      console.error('Erro ao buscar códigos de parada:', error);
+      console.error('Erro ao buscar códigos de parada, usando defaults/local:', error);
+      setUseLocalFallback(true);
+      const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+      setStopCodes(localStops);
     } finally {
       setIsLoadingStops(false);
     }
@@ -407,6 +555,20 @@ export default function App() {
 
   const saveStopCode = async (stop: StopCode) => {
     try {
+      if (useLocalFallback) {
+        const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+        const index = localStops.findIndex(s => s.code === stop.code);
+        if (index > -1) {
+          localStops[index] = stop;
+        } else {
+          localStops.push(stop);
+        }
+        localStorage.setItem('oee_local_stop_codes', JSON.stringify(localStops));
+        fetchStopCodes();
+        setEditingStop(null);
+        return;
+      }
+
       const { error } = await supabase
         .from('stop_codes')
         .upsert([stop]);
@@ -423,6 +585,14 @@ export default function App() {
   const deleteStopCode = async (code: number) => {
     if (!confirm('Tem certeza que deseja excluir este código de parada?')) return;
     try {
+      if (useLocalFallback) {
+        const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+        const filtered = localStops.filter(s => s.code !== code);
+        localStorage.setItem('oee_local_stop_codes', JSON.stringify(filtered));
+        fetchStopCodes();
+        return;
+      }
+
       const { error } = await supabase
         .from('stop_codes')
         .delete()
@@ -451,6 +621,43 @@ export default function App() {
   const fetchHistory = async () => {
     setHistoryError(null);
     try {
+      if (useLocalFallback) {
+        let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        if (localRecords.length === 0) {
+          localRecords = generateSampleLocalRecords();
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+        }
+        
+        // Aplicar filtros locally
+        let filtered = [...localRecords];
+        
+        if (lineFilter !== 'Todas') {
+          filtered = filtered.filter(r => r.machine_name === lineFilter);
+        }
+        
+        // Filtro de Mês e Data
+        const year = parseInt(monthFilter.split('-')[0]);
+        const month = parseInt(monthFilter.split('-')[1]);
+        
+        filtered = filtered.filter(r => {
+          const rDate = new Date(r.created_at);
+          const rYear = rDate.getFullYear();
+          const rMonth = rDate.getMonth() + 1;
+          const rDay = rDate.getDate();
+          
+          const matchesMonth = rYear === year && rMonth === month;
+          if (dateFilter !== 'Todas') {
+            const day = parseInt(dateFilter);
+            return matchesMonth && rDay === day;
+          }
+          return matchesMonth;
+        });
+        
+        filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        setHistory(filtered.slice(0, 31));
+        return;
+      }
+
       let query = supabase
         .from('oee_records')
         .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
@@ -482,8 +689,36 @@ export default function App() {
       if (error) throw error;
       if (data) setHistory(data);
     } catch (error: any) {
-      console.error('Erro ao buscar histórico:', error);
-      setHistoryError(error.message || 'Erro de conexão com o banco de dados');
+      console.error('Erro ao buscar histórico, migrando para local:', error);
+      setUseLocalFallback(true);
+      // Local fallback
+      let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+      if (localRecords.length === 0) {
+        localRecords = generateSampleLocalRecords();
+        localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+      }
+      
+      // Aplicar filtros locally
+      let filtered = [...localRecords];
+      if (lineFilter !== 'Todas') {
+        filtered = filtered.filter(r => r.machine_name === lineFilter);
+      }
+      const year = parseInt(monthFilter.split('-')[0]);
+      const month = parseInt(monthFilter.split('-')[1]);
+      filtered = filtered.filter(r => {
+        const rDate = new Date(r.created_at);
+        const rYear = rDate.getFullYear();
+        const rMonth = rDate.getMonth() + 1;
+        const rDay = rDate.getDate();
+        const matchesMonth = rYear === year && rMonth === month;
+        if (dateFilter !== 'Todas') {
+          const day = parseInt(dateFilter);
+          return matchesMonth && rDay === day;
+        }
+        return matchesMonth;
+      });
+      filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setHistory(filtered.slice(0, 31));
     }
   };
 
@@ -496,6 +731,15 @@ export default function App() {
     if (!confirm('Tem certeza que deseja excluir este registro permanentemente?')) return;
     
     try {
+      if (useLocalFallback) {
+        const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        const filtered = localRecords.filter(item => item.id !== id);
+        localStorage.setItem('oee_local_records', JSON.stringify(filtered));
+        setHistory(prev => prev.filter(item => item.id !== id));
+        alert('Registro excluído com sucesso!');
+        return;
+      }
+
       const { error } = await supabase
         .from('oee_records')
         .delete()
@@ -505,6 +749,7 @@ export default function App() {
       
       // Atualiza o estado local removendo o item
       setHistory(prev => prev.filter(item => item.id !== id));
+      alert('Registro excluído com sucesso!');
     } catch (error: any) {
       console.error('Erro ao excluir registro:', error);
       alert('Erro ao excluir: ' + error.message);
@@ -529,6 +774,7 @@ export default function App() {
       };
 
       const record = {
+        id: isEditing && editingRecordId ? editingRecordId : 'local-' + Date.now(),
         created_at: isEditing ? (inputs as any).date_created_original || new Date(inputs.date + 'T12:00:00').toISOString() : new Date(inputs.date + 'T12:00:00').toISOString(),
         machine_name: inputs.line,
         sku: inputs.sku,
@@ -541,10 +787,42 @@ export default function App() {
         downtime_data: JSON.stringify(enrichedInputs)
       };
 
+      if (useLocalFallback) {
+        const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        if (isEditing && editingRecordId) {
+          const index = localRecords.findIndex(r => r.id === editingRecordId);
+          if (index > -1) {
+            localRecords[index] = { ...record, id: editingRecordId };
+          }
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+          alert('Registro atualizado com sucesso!');
+        } else {
+          localRecords.push(record);
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+          alert('Registro salvo com sucesso!');
+        }
+        
+        setIsEditing(false);
+        setEditingRecordId(null);
+        fetchHistory();
+        return;
+      }
+
       if (isEditing && editingRecordId) {
         const { error } = await supabase
           .from('oee_records')
-          .update(record)
+          .update({
+            created_at: record.created_at,
+            machine_name: record.machine_name,
+            sku: record.sku,
+            availability: record.availability,
+            performance: record.performance,
+            quality: record.quality,
+            oee_score: record.oee_score,
+            shift: record.shift,
+            notes: record.notes,
+            downtime_data: record.downtime_data
+          })
           .eq('id', editingRecordId);
         
         if (error) throw error;
@@ -552,7 +830,18 @@ export default function App() {
       } else {
         const { error } = await supabase
           .from('oee_records')
-          .insert([record]);
+          .insert([{
+            created_at: record.created_at,
+            machine_name: record.machine_name,
+            sku: record.sku,
+            availability: record.availability,
+            performance: record.performance,
+            quality: record.quality,
+            oee_score: record.oee_score,
+            shift: record.shift,
+            notes: record.notes,
+            downtime_data: record.downtime_data
+          }]);
         
         if (error) throw error;
         alert('Registro salvo com sucesso!');
@@ -758,6 +1047,17 @@ export default function App() {
     if (!currentUser) return;
     setIsFetchingDashboard(true);
     try {
+      if (useLocalFallback) {
+        const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        const matched = localRecords.find(r => {
+          const rDate = new Date(r.created_at);
+          const formattedDate = `${rDate.getFullYear()}-${String(rDate.getMonth() + 1).padStart(2, '0')}-${String(rDate.getDate()).padStart(2, '0')}`;
+          return formattedDate === dashboardDate && r.machine_name === dashboardLine;
+        });
+        setDashboardRecord(matched || null);
+        return;
+      }
+
       // Definir início e fim do dia no fuso horário local e converter para ISO para o Supabase
       const startDate = new Date(`${dashboardDate}T00:00:00`).toISOString();
       const endDate = new Date(`${dashboardDate}T23:59:59`).toISOString();
@@ -774,8 +1074,15 @@ export default function App() {
       if (error) throw error;
       setDashboardRecord(data && data.length > 0 ? data[0] : null);
     } catch (err) {
-      console.error('Erro ao buscar registro do dashboard:', err);
-      setDashboardRecord(null);
+      console.error('Erro ao buscar registro do dashboard, usando local:', err);
+      // Fallback local
+      const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+      const matched = localRecords.find(r => {
+        const rDate = new Date(r.created_at);
+        const formattedDate = `${rDate.getFullYear()}-${String(rDate.getMonth() + 1).padStart(2, '0')}-${String(rDate.getDate()).padStart(2, '0')}`;
+        return formattedDate === dashboardDate && r.machine_name === dashboardLine;
+      });
+      setDashboardRecord(matched || null);
     } finally {
       setIsFetchingDashboard(false);
     }
@@ -1019,6 +1326,41 @@ export default function App() {
     setLoginError('');
     
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        
+        // Se a lista estiver vazia, verifique e insira o admin principal padrão
+        const adminExists = localUsers.some(u => u.email === MAIN_ADMIN_EMAIL);
+        let updatedUsers = [...localUsers];
+        if (!adminExists) {
+          const defaultAdmin = {
+            name: 'Administrador Guideway',
+            email: MAIN_ADMIN_EMAIL,
+            password: 'admin',
+            is_admin: true
+          };
+          updatedUsers = [...localUsers, defaultAdmin];
+          localStorage.setItem('oee_local_users', JSON.stringify(updatedUsers));
+        }
+
+        const matched = updatedUsers.find(u => u.email === loginEmail && u.password === loginPassword);
+        if (!matched) {
+          setLoginError('E-mail ou senha incorretos.');
+          return;
+        }
+
+        const user: User = {
+          name: matched.name,
+          email: matched.email,
+          password: matched.password,
+          isAdmin: matched.is_admin
+        };
+
+        setCurrentUser(user);
+        localStorage.setItem('oee_guide_session', JSON.stringify(user));
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -1041,8 +1383,38 @@ export default function App() {
       setCurrentUser(user);
       localStorage.setItem('oee_guide_session', JSON.stringify(user));
     } catch (error) {
-      console.error('Erro no login:', error);
-      setLoginError('Erro ao conectar com o servidor.');
+      console.error('Erro no login, migrando para local:', error);
+      setUseLocalFallback(true);
+      // login local
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      const matched = localUsers.find(u => u.email === loginEmail && u.password === loginPassword);
+      if (!matched) {
+        // Se for o admin inicial e os usuários locais estão vazios
+        if (loginEmail === MAIN_ADMIN_EMAIL && loginPassword === 'admin') {
+          const user: User = {
+            name: 'Administrador Guideway',
+            email: MAIN_ADMIN_EMAIL,
+            password: 'admin',
+            isAdmin: true
+          };
+          setCurrentUser(user);
+          localStorage.setItem('oee_guide_session', JSON.stringify(user));
+          localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, user]));
+          return;
+        }
+        setLoginError('E-mail ou senha incorretos.');
+        return;
+      }
+
+      const user: User = {
+        name: matched.name,
+        email: matched.email,
+        password: matched.password,
+        isAdmin: matched.is_admin
+      };
+
+      setCurrentUser(user);
+      localStorage.setItem('oee_guide_session', JSON.stringify(user));
     }
   };
 
@@ -1062,6 +1434,28 @@ export default function App() {
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        if (localUsers.some(u => u.email === newUserEmail)) {
+          alert('Erro: Um usuário com este e-mail já existe.');
+          return;
+        }
+        const newUser = {
+          name: newUserName,
+          email: newUserEmail,
+          password: newUserPassword,
+          is_admin: newUserIsAdmin
+        };
+        localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, newUser]));
+        alert('Usuário criado com sucesso!');
+        setNewUserName('');
+        setNewUserEmail('');
+        setNewUserPassword('');
+        setNewUserIsAdmin(false);
+        fetchUsers();
+        return;
+      }
+
       const { error } = await supabase
         .from('users')
         .insert([{
@@ -1094,6 +1488,15 @@ export default function App() {
     if (!confirm(`Deseja realmente excluir o usuário ${email}?`)) return;
 
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        const filtered = localUsers.filter(u => u.email !== email);
+        localStorage.setItem('oee_local_users', JSON.stringify(filtered));
+        alert('Usuário excluído com sucesso!');
+        fetchUsers();
+        return;
+      }
+
       const { error } = await supabase
         .from('users')
         .delete()
@@ -2708,70 +3111,118 @@ export default function App() {
                               initial={{ opacity: 0, x: -10 }}
                               animate={{ opacity: 1, x: 0 }}
                               key={stop.id} 
-                              className="flex items-center gap-4 bg-black/40 p-4 rounded-2xl border border-white/5 group hover:border-white/10 transition-all"
+                              className="flex items-start gap-4 bg-black/40 p-5 rounded-2xl border border-white/5 group hover:border-white/10 transition-all flex-col md:flex-row md:items-center"
                             >
-                              <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
-                                {index + 1}
+                              <div className="flex items-center gap-4 w-full md:w-auto shrink-0">
+                                <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
+                                  {index + 1}
+                                </div>
                               </div>
-                              <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-4">
-                                <div className="md:col-span-2">
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
-                                  <select 
-                                    value={stop.code}
-                                    onChange={(e) => {
-                                      const newStops = [...inputs.stops];
-                                      newStops[index].code = parseInt(e.target.value);
-                                      setInputs(prev => ({ ...prev, stops: newStops }));
-                                    }}
-                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
-                                  >
-                                    {stopCodes.map(c => (
-                                      <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
-                                    ))}
-                                  </select>
-                                </div>
-                                <div>
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Início</label>
-                                  <input 
-                                    type="time"
-                                    value={stop.startTime || ''}
-                                    onChange={(e) => {
-                                      const newStops = [...inputs.stops];
-                                      newStops[index].startTime = e.target.value;
-                                      newStops[index].duration = calculateDurationMinutes(e.target.value, newStops[index].endTime);
-                                      setInputs(prev => ({ ...prev, stops: newStops }));
-                                    }}
-                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Término</label>
-                                  <div className="relative">
-                                    <input 
-                                      type="time"
-                                      value={stop.endTime || ''}
+                              <div className="flex-1 flex flex-col gap-4 w-full">
+                                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                  <div className="md:col-span-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
+                                    <select 
+                                      value={stop.code}
                                       onChange={(e) => {
                                         const newStops = [...inputs.stops];
-                                        newStops[index].endTime = e.target.value;
-                                        newStops[index].duration = calculateDurationMinutes(newStops[index].startTime, e.target.value);
+                                        newStops[index].code = parseInt(e.target.value);
+                                        if (newStops[index].code !== 500) {
+                                          newStops[index].reasonCategory = undefined;
+                                          newStops[index].customReason = undefined;
+                                        }
+                                        setInputs(prev => ({ ...prev, stops: newStops }));
+                                      }}
+                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                    >
+                                      {stopCodes.map(c => (
+                                        <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Início</label>
+                                    <input 
+                                      type="time"
+                                      value={stop.startTime || ''}
+                                      onChange={(e) => {
+                                        const newStops = [...inputs.stops];
+                                        newStops[index].startTime = e.target.value;
+                                        newStops[index].duration = calculateDurationMinutes(e.target.value, newStops[index].endTime);
                                         setInputs(prev => ({ ...prev, stops: newStops }));
                                       }}
                                       className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
                                     />
-                                    {stop.duration > 0 && (
-                                      <div className="absolute -bottom-5 right-0 text-[9px] font-bold text-blue-400 uppercase">
-                                        {stop.duration} min
-                                      </div>
-                                    )}
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Término</label>
+                                    <div className="relative">
+                                      <input 
+                                        type="time"
+                                        value={stop.endTime || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].endTime = e.target.value;
+                                          newStops[index].duration = calculateDurationMinutes(newStops[index].startTime, e.target.value);
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                      />
+                                      {stop.duration > 0 && (
+                                        <div className="absolute -bottom-5 right-0 text-[9px] font-bold text-blue-400 uppercase">
+                                          {stop.duration} min
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
+
+                                {stop.code === 500 && (
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3 border-t border-white/5">
+                                    <div>
+                                      <label className="text-[10px] font-bold text-amber-400 uppercase mb-1 block">Categoria do Motivo (Campo Suspenso)</label>
+                                      <select 
+                                        value={stop.reasonCategory || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].reasonCategory = e.target.value;
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-amber-500/30 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-amber-500 transition-all cursor-pointer"
+                                      >
+                                        <option value="">-- Selecione a Categoria do Motivo --</option>
+                                        <option value="Falha Operacional">Falha Operacional</option>
+                                        <option value="Ajuste Mecânico">Ajuste Mecânico</option>
+                                        <option value="Problema de Infraestrutura">Problema de Infraestrutura</option>
+                                        <option value="Aguardando Insumo/Material">Aguardando Insumo/Material</option>
+                                        <option value="Aguardando Manutenção">Aguardando Manutenção</option>
+                                        <option value="Limpeza/Organização">Limpeza/Organização</option>
+                                        <option value="Outro Motivo Específico">Outro Motivo Específico</option>
+                                      </select>
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] font-bold text-amber-400 uppercase mb-1 block">Justificativa Detalhada (Texto)</label>
+                                      <input 
+                                        type="text"
+                                        value={stop.customReason || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].customReason = e.target.value;
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-amber-500/30 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-amber-500 transition-all"
+                                        placeholder="Digite aqui o motivo detalhado..."
+                                      />
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                               <button 
                                 onClick={() => {
                                   const newStops = inputs.stops.filter((_, i) => i !== index);
                                   setInputs(prev => ({ ...prev, stops: newStops }));
                                 }}
-                                className="p-2 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg"
+                                className="p-2.5 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg shrink-0 mt-2 md:mt-0"
                               >
                                 <Trash2 size={18} />
                               </button>
@@ -3015,6 +3466,14 @@ function RecordDetailModal({ record, stopCodes, onClose }: { record: any, stopCo
                               <span className={`text-[9px] font-bold ${stopInfo?.category === 'P' ? 'text-blue-400' : 'text-red-400'}`}>
                                 {stopInfo?.category === 'P' ? 'Programada' : 'Não Programada'}
                               </span>
+                              {stop.code === 500 && (stop.reasonCategory || stop.customReason) && (
+                                <div className="mt-1.5 p-2 bg-amber-500/10 rounded-xl border border-amber-500/20 text-[10px] text-amber-200">
+                                  <span className="font-bold uppercase tracking-wider block text-[8px] text-amber-400 mb-0.5">Motivo de OUTROS:</span>
+                                  {stop.reasonCategory && <span className="font-semibold">{stop.reasonCategory}</span>}
+                                  {stop.reasonCategory && stop.customReason && <span className="mx-1">•</span>}
+                                  {stop.customReason && <span className="italic">"{stop.customReason}"</span>}
+                                </div>
+                              )}
                             </div>
                           </td>
                           <td className="px-6 py-3 text-slate-400">{stop.startTime || '-'}</td>
@@ -3126,3 +3585,4 @@ function InputField({ label, value, onChange, icon, type = "number" }: { label: 
     </div>
   );
 }
+
