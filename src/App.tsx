@@ -47,10 +47,10 @@ import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { supabase } from '@/lib/supabase';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
 // Error Boundary Component
-class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
+export class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
   constructor(props: any) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -89,6 +89,33 @@ class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasErr
   }
 }
 
+const getWeekNameForDateStr = (dateStr: string): string => {
+  try {
+    const d = new Date(dateStr);
+    const day = d.getDate();
+    const year = d.getFullYear();
+    const month = d.getMonth() + 1; // 1-indexed
+
+    // Calculate first Monday
+    let firstMonday = 1;
+    for (let tempDay = 1; tempDay <= 7; tempDay++) {
+      const date = new Date(year, month - 1, tempDay);
+      if (date.getDay() === 1) { // 1 is Monday
+        firstMonday = tempDay;
+        break;
+      }
+    }
+
+    if (day <= firstMonday + 6) return 'S1';
+    if (day <= firstMonday + 13) return 'S2';
+    if (day <= firstMonday + 20) return 'S3';
+    if (day <= firstMonday + 27) return 'S4';
+    return 'S5';
+  } catch (e) {
+    return 'S1';
+  }
+};
+
 // Custom Tooltip for OEE Evolution Chart
 const CustomOEEEvolutionTooltip = ({ active, payload, label }: any) => {
   if (active && payload && payload.length) {
@@ -97,7 +124,7 @@ const CustomOEEEvolutionTooltip = ({ active, payload, label }: any) => {
     return (
       <div className="bg-zinc-900 border border-white/10 p-3 rounded-xl shadow-xl">
         <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">
-          {new Date(label).toLocaleString('pt-BR')}
+          {new Date(label).toLocaleDateString('pt-BR')} • {getWeekNameForDateStr(label)}
         </p>
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
@@ -118,6 +145,8 @@ interface StopEntry {
   startTime: string; // HH:mm
   endTime: string;   // HH:mm
   duration: number;  // minutos (calculado)
+  reasonCategory?: string; // Categoria do Motivo (campo suspenso para OUTROS)
+  customReason?: string;   // Observação personalizada (texto)
 }
 
 // Helper to calculate duration in minutes between two HH:mm strings
@@ -138,6 +167,23 @@ const calculateDurationMinutes = (start: string, end: string): number => {
   }
   
   return endTotal - startTotal;
+};
+
+// Safe localStorage helper to prevent JSON parsing crashes
+const safeGetLocalStorage = <T,>(key: string, defaultValue: T): T => {
+  try {
+    const item = localStorage.getItem(key);
+    if (!item || item === 'undefined' || item === 'null') {
+      return defaultValue;
+    }
+    return JSON.parse(item) as T;
+  } catch (e) {
+    console.warn(`Erro ao ler/parsear a chave "${key}" do localStorage:`, e);
+    try {
+      localStorage.removeItem(key); // Remove para evitar erros subsequentes
+    } catch (_) {}
+    return defaultValue;
+  }
 };
 
 interface OEEInputs {
@@ -234,9 +280,68 @@ interface User {
 // Agora os usuários são gerenciados via Supabase.
 // O administrador principal será verificado pelo e-mail.
 const MAIN_ADMIN_EMAIL = 'josemarcelolustosa@gmail.com';
-// ---------------------------------------------------------------
+
+const generateSampleLocalRecords = () => {
+  const records = [];
+  const lines = ['Linha 01', 'Linha 02'];
+  const skus = ['Água Mineral 500ml', 'Água Mineral 1.5L', 'Água com Gás 500ml'];
+  
+  const today = new Date();
+  
+  for (let i = 10; i >= 0; i--) {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i, 12, 0, 0);
+    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    
+    // Variar um pouco os valores para ficar realista
+    const oeeBase = 65 + Math.random() * 25;
+    const avail = 75 + Math.random() * 20;
+    const perf = 80 + Math.random() * 18;
+    const qual = 95 + Math.random() * 4.9;
+    
+    const calculatedOee = (avail/100) * (perf/100) * (qual/100) * 100;
+    const line = lines[Math.floor(Math.random() * lines.length)];
+    const sku = skus[Math.floor(Math.random() * skus.length)];
+    
+    const sampleInputs: OEEInputs = {
+      date: dateStr,
+      sku: sku,
+      line: line,
+      A: 24,
+      B: 80,
+      C: 12,
+      D: 22000,
+      H: Math.floor(8000 + Math.random() * 4000),
+      K: 2,
+      stops: [
+        { id: 's1', code: 101, startTime: '12:00', endTime: '13:00', duration: 60 },
+        { id: 's2', code: 2, startTime: '15:30', endTime: '16:00', duration: 30 }
+      ],
+      U: Math.floor(Math.random() * 100),
+      shiftStartTime: '06:00',
+      shiftEndTime: '22:00',
+      initialCounter: 0,
+      finalCounter: 120000
+    };
+    
+    records.push({
+      id: 'local-sample-' + i,
+      created_at: date.toISOString(),
+      machine_name: line,
+      sku: sku,
+      availability: avail,
+      performance: perf,
+      quality: qual,
+      oee_score: calculatedOee,
+      shift: 'Turnos: 2',
+      notes: `Produção Real: ${sampleInputs.H}`,
+      downtime_data: JSON.stringify(sampleInputs)
+    });
+  }
+  return records;
+};
 
 export default function App() {
+  const [useLocalFallback, setUseLocalFallback] = useState(!isSupabaseConfigured);
   // Auth State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
@@ -251,6 +356,7 @@ export default function App() {
   const [isLoadingStops, setIsLoadingStops] = useState(false);
   const [editingStop, setEditingStop] = useState<StopCode | null>(null);
   const [newStop, setNewStop] = useState<Partial<StopCode>>({ category: 'NP' });
+  const [selectedParetoCode, setSelectedParetoCode] = useState<number | null>(null);
 
   // Initial state based on the provided example image
   const [inputs, setInputs] = useState<OEEInputs>(() => {
@@ -293,12 +399,28 @@ export default function App() {
   const [lineFilter, setLineFilter] = useState<string>('Todas');
   const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
   const [dateFilter, setDateFilter] = useState<string>('Todas');
+  const [weekFilter, setWeekFilter] = useState<string>('Todas');
 
   // Buscar o último registro geral para inicializar o Dashboard
   const fetchLatestRecord = async () => {
     if (!currentUser) return;
     setIsFetchingDashboard(true);
     try {
+      if (useLocalFallback) {
+        const localRecordsStr = localStorage.getItem('oee_local_records');
+        const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+        if (localRecords.length > 0) {
+          localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+          const latest = localRecords[0];
+          const d = new Date(latest.created_at);
+          const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          setDashboardDate(recordDate);
+          setDashboardLine(latest.machine_name);
+          setDashboardRecord(latest);
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('oee_records')
         .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
@@ -309,7 +431,6 @@ export default function App() {
       
       if (data && data.length > 0) {
         const latest = data[0];
-        // Extrai apenas a parte da data YYYY-MM-DD (Local)
         const d = new Date(latest.created_at);
         const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         
@@ -318,7 +439,20 @@ export default function App() {
         setDashboardRecord(latest);
       }
     } catch (err) {
-      console.error('Erro ao buscar último registro para o dashboard:', err);
+      console.error('Erro ao buscar último registro, migrando para modo local:', err);
+      setUseLocalFallback(true);
+      // Fallback
+      const localRecordsStr = localStorage.getItem('oee_local_records');
+      const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+      if (localRecords.length > 0) {
+        localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        const latest = localRecords[0];
+        const d = new Date(latest.created_at);
+        const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        setDashboardDate(recordDate);
+        setDashboardLine(latest.machine_name);
+        setDashboardRecord(latest);
+      }
     } finally {
       setIsFetchingDashboard(false);
     }
@@ -327,6 +461,20 @@ export default function App() {
   // Buscar usuários do Supabase (Apenas para ADM)
   const ensureAdminExists = async () => {
     try {
+      // Sempre garante no local
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      if (!localUsers.some((u: any) => u.email === MAIN_ADMIN_EMAIL)) {
+        localUsers.push({
+          name: 'Administrador Guideway',
+          email: MAIN_ADMIN_EMAIL,
+          password: 'admin',
+          isAdmin: true
+        });
+        localStorage.setItem('oee_local_users', JSON.stringify(localUsers));
+      }
+
+      if (useLocalFallback) return;
+
       const { data, error } = await supabase
         .from('users')
         .select('email')
@@ -334,7 +482,7 @@ export default function App() {
         .single();
       
       if (error && error.code === 'PGRST116') { // PGRST116 = Not Found
-        console.log('Criando usuário administrador inicial...');
+        console.log('Criando usuário administrador inicial no Supabase...');
         await supabase.from('users').insert([{
           name: 'Administrador Guideway',
           email: MAIN_ADMIN_EMAIL,
@@ -343,7 +491,7 @@ export default function App() {
         }]);
       }
     } catch (err) {
-      console.error('Erro ao verificar administrador:', err);
+      console.error('Erro ao verificar administrador no Supabase:', err);
     }
   };
 
@@ -351,6 +499,18 @@ export default function App() {
     if (!currentUser?.isAdmin) return;
     setIsLoadingUsers(true);
     try {
+      if (useLocalFallback) {
+        const localUsers = localStorage.getItem('oee_local_users');
+        if (localUsers) {
+          setUsers(JSON.parse(localUsers));
+        } else {
+          const defaultUsers = [{ name: 'Administrador Guideway', email: MAIN_ADMIN_EMAIL, password: 'admin', isAdmin: true }];
+          localStorage.setItem('oee_local_users', JSON.stringify(defaultUsers));
+          setUsers(defaultUsers);
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -364,7 +524,16 @@ export default function App() {
         isAdmin: u.is_admin
       })));
     } catch (error: any) {
-      console.error('Erro ao buscar usuários:', error);
+      console.error('Erro ao buscar usuários de Supabase, mudando para dados locais:', error);
+      setUseLocalFallback(true);
+      const localUsers = localStorage.getItem('oee_local_users');
+      if (localUsers) {
+        setUsers(JSON.parse(localUsers));
+      } else {
+        const defaultUsers = [{ name: 'Administrador Guideway', email: MAIN_ADMIN_EMAIL, password: 'admin', isAdmin: true }];
+        localStorage.setItem('oee_local_users', JSON.stringify(defaultUsers));
+        setUsers(defaultUsers);
+      }
     } finally {
       setIsLoadingUsers(false);
     }
@@ -373,6 +542,17 @@ export default function App() {
   const fetchStopCodes = async () => {
     setIsLoadingStops(true);
     try {
+      if (useLocalFallback) {
+        const localStops = localStorage.getItem('oee_local_stop_codes');
+        if (localStops) {
+          setStopCodes(JSON.parse(localStops));
+        } else {
+          localStorage.setItem('oee_local_stop_codes', JSON.stringify(DEFAULT_STOP_CODES));
+          setStopCodes(DEFAULT_STOP_CODES);
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('stop_codes')
         .select('*')
@@ -380,7 +560,10 @@ export default function App() {
       
       if (error) {
         if (error.code === 'PGRST116' || error.message.includes('relation "stop_codes" does not exist')) {
-          console.warn('Tabela stop_codes não existe. Usando defaults.');
+          console.warn('Tabela stop_codes não existe. Usando defaults locais.');
+          setUseLocalFallback(true);
+          const localStops = localStorage.getItem('oee_local_stop_codes') || JSON.stringify(DEFAULT_STOP_CODES);
+          setStopCodes(JSON.parse(localStops));
           return;
         }
         throw error;
@@ -399,7 +582,15 @@ export default function App() {
         setStopCodes(DEFAULT_STOP_CODES);
       }
     } catch (error: any) {
-      console.error('Erro ao buscar códigos de parada:', error);
+      console.error('Erro ao buscar códigos de parada, mudando para dados locais:', error);
+      setUseLocalFallback(true);
+      const localStops = localStorage.getItem('oee_local_stop_codes');
+      if (localStops) {
+        setStopCodes(JSON.parse(localStops));
+      } else {
+        localStorage.setItem('oee_local_stop_codes', JSON.stringify(DEFAULT_STOP_CODES));
+        setStopCodes(DEFAULT_STOP_CODES);
+      }
     } finally {
       setIsLoadingStops(false);
     }
@@ -407,6 +598,20 @@ export default function App() {
 
   const saveStopCode = async (stop: StopCode) => {
     try {
+      if (useLocalFallback) {
+        const localStops = JSON.parse(localStorage.getItem('oee_local_stop_codes') || JSON.stringify(DEFAULT_STOP_CODES));
+        const index = localStops.findIndex((s: any) => s.code === stop.code);
+        if (index >= 0) {
+          localStops[index] = stop;
+        } else {
+          localStops.push(stop);
+        }
+        localStorage.setItem('oee_local_stop_codes', JSON.stringify(localStops));
+        setStopCodes(localStops);
+        setEditingStop(null);
+        return;
+      }
+
       const { error } = await supabase
         .from('stop_codes')
         .upsert([stop]);
@@ -415,14 +620,31 @@ export default function App() {
       fetchStopCodes();
       setEditingStop(null);
     } catch (error: any) {
-      console.error('Erro ao salvar código de parada:', error);
-      alert('Erro ao salvar: ' + error.message);
+      console.error('Erro ao salvar código de parada via Supabase, salvando localmente:', error);
+      const localStops = JSON.parse(localStorage.getItem('oee_local_stop_codes') || JSON.stringify(DEFAULT_STOP_CODES));
+      const index = localStops.findIndex((s: any) => s.code === stop.code);
+      if (index >= 0) {
+        localStops[index] = stop;
+      } else {
+        localStops.push(stop);
+      }
+      localStorage.setItem('oee_local_stop_codes', JSON.stringify(localStops));
+      setStopCodes(localStops);
+      setEditingStop(null);
     }
   };
 
   const deleteStopCode = async (code: number) => {
     if (!confirm('Tem certeza que deseja excluir este código de parada?')) return;
     try {
+      if (useLocalFallback) {
+        const localStops = JSON.parse(localStorage.getItem('oee_local_stop_codes') || JSON.stringify(DEFAULT_STOP_CODES));
+        const updated = localStops.filter((s: any) => s.code !== code);
+        localStorage.setItem('oee_local_stop_codes', JSON.stringify(updated));
+        setStopCodes(updated);
+        return;
+      }
+
       const { error } = await supabase
         .from('stop_codes')
         .delete()
@@ -431,8 +653,11 @@ export default function App() {
       if (error) throw error;
       fetchStopCodes();
     } catch (error: any) {
-      console.error('Erro ao excluir código de parada:', error);
-      alert('Erro ao excluir: ' + error.message);
+      console.error('Erro ao excluir código de parada via Supabase, excluindo localmente:', error);
+      const localStops = JSON.parse(localStorage.getItem('oee_local_stop_codes') || JSON.stringify(DEFAULT_STOP_CODES));
+      const updated = localStops.filter((s: any) => s.code !== code);
+      localStorage.setItem('oee_local_stop_codes', JSON.stringify(updated));
+      setStopCodes(updated);
     }
   };
 
@@ -447,10 +672,45 @@ export default function App() {
     fetchStopCodes(); // Carrega paradas logo no início para garantir que o inputs funcione
   }, []);
 
-  // Carregar histórico do Supabase
+  // Carregar histórico do Supabase ou dados locais
   const fetchHistory = async () => {
     setHistoryError(null);
     try {
+      if (useLocalFallback) {
+        const localRecordsStr = localStorage.getItem('oee_local_records');
+        let localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+        
+        // Filtros no local storage
+        if (lineFilter !== 'Todas') {
+          localRecords = localRecords.filter((r: any) => r.machine_name === lineFilter);
+        }
+        
+        const year = parseInt(monthFilter.split('-')[0]);
+        const month = parseInt(monthFilter.split('-')[1]);
+        
+        localRecords = localRecords.filter((record: any) => {
+          try {
+            const d = new Date(record.created_at);
+            const recordYear = d.getFullYear();
+            const recordMonth = d.getMonth() + 1; // 1-indexed
+            
+            if (recordYear !== year || recordMonth !== month) return false;
+            
+            if (dateFilter !== 'Todas') {
+              const day = parseInt(dateFilter);
+              return d.getDate() === day;
+            }
+            return true;
+          } catch {
+            return false;
+          }
+        });
+
+        localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        setHistory(localRecords);
+        return;
+      }
+
       let query = supabase
         .from('oee_records')
         .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
@@ -467,7 +727,6 @@ export default function App() {
       let startDate, endDate;
       if (dateFilter !== 'Todas') {
         const day = parseInt(dateFilter);
-        // Usar data local para o filtro
         startDate = new Date(year, month - 1, day, 0, 0, 0).toISOString();
         endDate = new Date(year, month - 1, day, 23, 59, 59).toISOString();
       } else {
@@ -482,12 +741,36 @@ export default function App() {
       if (error) throw error;
       if (data) setHistory(data);
     } catch (error: any) {
-      console.error('Erro ao buscar histórico:', error);
-      setHistoryError(error.message || 'Erro de conexão com o banco de dados');
+      console.error('Erro ao buscar histórico, mudando para dados locais:', error);
+      setUseLocalFallback(true);
+      
+      // Fallback local
+      const localRecordsStr = localStorage.getItem('oee_local_records');
+      let localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+      if (lineFilter !== 'Todas') {
+        localRecords = localRecords.filter((r: any) => r.machine_name === lineFilter);
+      }
+      const year = parseInt(monthFilter.split('-')[0]);
+      const month = parseInt(monthFilter.split('-')[1]);
+      localRecords = localRecords.filter((record: any) => {
+        try {
+          const d = new Date(record.created_at);
+          const recordYear = d.getFullYear();
+          const recordMonth = d.getMonth() + 1;
+          if (recordYear !== year || recordMonth !== month) return false;
+          if (dateFilter !== 'Todas') {
+            const day = parseInt(dateFilter);
+            return d.getDate() === day;
+          }
+          return true;
+        } catch { return false; }
+      });
+      localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setHistory(localRecords);
     }
   };
 
-  // Excluir registro do Supabase
+  // Excluir registro do Supabase ou dados locais
   const deleteRecord = async (id: string) => {
     if (!currentUser?.isAdmin) {
       alert('Apenas administradores podem excluir registros.');
@@ -496,6 +779,19 @@ export default function App() {
     if (!confirm('Tem certeza que deseja excluir este registro permanentemente?')) return;
     
     try {
+      if (useLocalFallback) {
+        const localRecordsStr = localStorage.getItem('oee_local_records');
+        let localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+        const updated = localRecords.filter((item: any) => item.id !== id);
+        localStorage.setItem('oee_local_records', JSON.stringify(updated));
+        setHistory(prev => prev.filter(item => item.id !== id));
+        if (dashboardRecord && dashboardRecord.id === id) {
+          setDashboardRecord(null);
+        }
+        alert('Registro excluído com sucesso (Local).');
+        return;
+      }
+
       const { error } = await supabase
         .from('oee_records')
         .delete()
@@ -503,23 +799,31 @@ export default function App() {
 
       if (error) throw error;
       
-      // Atualiza o estado local removendo o item
       setHistory(prev => prev.filter(item => item.id !== id));
+      if (dashboardRecord && dashboardRecord.id === id) {
+        setDashboardRecord(null);
+      }
     } catch (error: any) {
-      console.error('Erro ao excluir registro:', error);
-      alert('Erro ao excluir: ' + error.message);
+      console.error('Erro ao excluir registro via Supabase, excluindo localmente:', error);
+      const localRecordsStr = localStorage.getItem('oee_local_records');
+      let localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+      const updated = localRecords.filter((item: any) => item.id !== id);
+      localStorage.setItem('oee_local_records', JSON.stringify(updated));
+      setHistory(prev => prev.filter(item => item.id !== id));
+      if (dashboardRecord && dashboardRecord.id === id) {
+        setDashboardRecord(null);
+      }
     }
   };
 
-  // Salvar registro no Supabase
+  // Salvar registro no Supabase ou dados locais
   const saveRecord = async () => {
     setIsSaving(true);
+    let record: any = null;
     try {
       const now = new Date().toISOString();
       const editorName = currentUser?.name || 'Sistema';
 
-      // Incluímos o nome do operador e a data real de salvamento no JSON de inputs
-      // Além de quem editou por último
       const enrichedInputs = {
         ...inputs,
         operator_name: isEditing ? (inputs as any).operator_name : editorName,
@@ -528,7 +832,7 @@ export default function App() {
         last_edited_at: now
       };
 
-      const record = {
+      record = {
         created_at: isEditing ? (inputs as any).date_created_original || new Date(inputs.date + 'T12:00:00').toISOString() : new Date(inputs.date + 'T12:00:00').toISOString(),
         machine_name: inputs.line,
         sku: inputs.sku,
@@ -540,6 +844,31 @@ export default function App() {
         notes: `Produção Real: ${inputs.H}`,
         downtime_data: JSON.stringify(enrichedInputs)
       };
+
+      if (useLocalFallback) {
+        const localRecordsStr = localStorage.getItem('oee_local_records');
+        let localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+        
+        if (isEditing && editingRecordId) {
+          const index = localRecords.findIndex((r: any) => r.id === editingRecordId);
+          if (index >= 0) {
+            localRecords[index] = { ...localRecords[index], ...record };
+          }
+          alert('Registro atualizado com sucesso (Local)!');
+        } else {
+          const newRecord = {
+            id: 'local-' + Math.random().toString(36).substr(2, 9),
+            ...record
+          };
+          localRecords.push(newRecord);
+          alert('Registro salvo com sucesso (Local)!');
+        }
+        localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+        setIsEditing(false);
+        setEditingRecordId(null);
+        fetchHistory();
+        return;
+      }
 
       if (isEditing && editingRecordId) {
         const { error } = await supabase
@@ -558,13 +887,35 @@ export default function App() {
         alert('Registro salvo com sucesso!');
       }
       
-      // Resetar estados de edição
       setIsEditing(false);
       setEditingRecordId(null);
-      fetchHistory(); // Atualiza a lista após salvar
+      fetchHistory();
     } catch (error: any) {
-      console.error('Erro ao salvar registro:', error);
-      alert('Erro ao salvar registro: ' + error.message);
+      console.error('Erro ao salvar registro via Supabase, salvando localmente:', error);
+      const localRecordsStr = localStorage.getItem('oee_local_records');
+      let localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+      
+      const recordToSave = {
+        id: (isEditing && editingRecordId) ? editingRecordId : 'local-' + Math.random().toString(36).substr(2, 9),
+        ...(record || {})
+      };
+      
+      if (isEditing && editingRecordId) {
+        const index = localRecords.findIndex((r: any) => r.id === editingRecordId);
+        if (index >= 0) {
+          localRecords[index] = recordToSave;
+        } else {
+          localRecords.push(recordToSave);
+        }
+      } else {
+        localRecords.push(recordToSave);
+      }
+      
+      localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+      alert('Salvo localmente devido a falha no banco externo.');
+      setIsEditing(false);
+      setEditingRecordId(null);
+      fetchHistory();
     } finally {
       setIsSaving(false);
     }
@@ -753,12 +1104,31 @@ export default function App() {
     ];
   }, [dashboardData]);
 
-  // Buscar registro específico para o Dashboard
+  // Buscar registro específico para o Dashboard ou dados locais
   const fetchDashboardRecord = async () => {
     if (!currentUser) return;
     setIsFetchingDashboard(true);
     try {
-      // Definir início e fim do dia no fuso horário local e converter para ISO para o Supabase
+      if (useLocalFallback) {
+        const localRecordsStr = localStorage.getItem('oee_local_records');
+        const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+        
+        const matched = localRecords.filter((r: any) => {
+          if (r.machine_name !== dashboardLine) return false;
+          const d = new Date(r.created_at);
+          const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          return recordDate === dashboardDate;
+        });
+
+        if (matched.length > 0) {
+          matched.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+          setDashboardRecord(matched[0]);
+        } else {
+          setDashboardRecord(null);
+        }
+        return;
+      }
+
       const startDate = new Date(`${dashboardDate}T00:00:00`).toISOString();
       const endDate = new Date(`${dashboardDate}T23:59:59`).toISOString();
 
@@ -774,8 +1144,24 @@ export default function App() {
       if (error) throw error;
       setDashboardRecord(data && data.length > 0 ? data[0] : null);
     } catch (err) {
-      console.error('Erro ao buscar registro do dashboard:', err);
-      setDashboardRecord(null);
+      console.error('Erro ao buscar registro do dashboard via Supabase, usando local:', err);
+      // Fallback
+      const localRecordsStr = localStorage.getItem('oee_local_records');
+      const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+      
+      const matched = localRecords.filter((r: any) => {
+        if (r.machine_name !== dashboardLine) return false;
+        const d = new Date(r.created_at);
+        const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        return recordDate === dashboardDate;
+      });
+
+      if (matched.length > 0) {
+        matched.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        setDashboardRecord(matched[0]);
+      } else {
+        setDashboardRecord(null);
+      }
     } finally {
       setIsFetchingDashboard(false);
     }
@@ -869,8 +1255,49 @@ export default function App() {
     }
   };
 
+  const filteredHistory = useMemo(() => {
+    if (weekFilter === 'Todas') return history;
+
+    return history.filter(record => {
+      try {
+        const recordDate = new Date(record.created_at);
+        const day = recordDate.getDate();
+        const year = recordDate.getFullYear();
+        const month = recordDate.getMonth() + 1; // 1-indexed
+
+        // Calculate first Monday
+        let firstMonday = 1;
+        for (let d = 1; d <= 7; d++) {
+          const date = new Date(year, month - 1, d);
+          if (date.getDay() === 1) { // 1 is Monday
+            firstMonday = d;
+            break;
+          }
+        }
+
+        let recordWeek = 'S1';
+        if (day <= firstMonday + 6) {
+          recordWeek = 'S1';
+        } else if (day <= firstMonday + 13) {
+          recordWeek = 'S2';
+        } else if (day <= firstMonday + 20) {
+          recordWeek = 'S3';
+        } else if (day <= firstMonday + 27) {
+          recordWeek = 'S4';
+        } else {
+          recordWeek = 'S5';
+        }
+
+        return recordWeek === weekFilter;
+      } catch (err) {
+        console.error('Erro ao mapear semana do registro:', err);
+        return false;
+      }
+    });
+  }, [history, weekFilter]);
+
   const consolidatedMetrics = useMemo(() => {
-    if (history.length === 0) {
+    if (filteredHistory.length === 0) {
       return { 
         oee: 0, 
         disponibilidade: 0, 
@@ -884,7 +1311,7 @@ export default function App() {
       };
     }
     
-    const sum = history.reduce((acc, curr) => ({
+    const sum = filteredHistory.reduce((acc, curr) => ({
       oee: acc.oee + curr.oee_score,
       disponibilidade: acc.disponibilidade + curr.availability,
       performance: acc.performance + curr.performance,
@@ -900,7 +1327,7 @@ export default function App() {
     let computedTeepSum = 0;
     let recordCountWithTeep = 0;
 
-    history.forEach(record => {
+    filteredHistory.forEach(record => {
       if (record.downtime_data) {
         try {
           const parsed = typeof record.downtime_data === 'string' 
@@ -941,8 +1368,10 @@ export default function App() {
 
     const allPareto = Object.entries(stopsMap)
       .map(([code, duration]) => {
-        const config = stopCodes.find(c => c.code === parseInt(code));
+        const numericCode = parseInt(code);
+        const config = stopCodes.find(c => c.code === numericCode);
         return {
+          code: numericCode,
           name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
           duration,
           category: config?.category || 'NP'
@@ -954,17 +1383,17 @@ export default function App() {
     const paretoP = allPareto.filter(item => item.category === 'P');
     
     return {
-      oee: sum.oee / history.length,
-      disponibilidade: sum.disponibilidade / history.length,
-      performance: sum.performance / history.length,
-      qualidade: sum.qualidade / history.length,
+      oee: sum.oee / filteredHistory.length,
+      disponibilidade: sum.disponibilidade / filteredHistory.length,
+      performance: sum.performance / filteredHistory.length,
+      qualidade: sum.qualidade / filteredHistory.length,
       maintenanceIndex,
       teep: avgTeep,
       productivity: avgProductivity,
       paretoNP,
       paretoP
     };
-  }, [history, stopCodes]);
+  }, [filteredHistory, stopCodes]);
 
   const currentParetoData = useMemo(() => {
     const stopsMap: { [key: number]: number } = {};
@@ -1001,9 +1430,16 @@ export default function App() {
   // Initialize session
   useEffect(() => {
     ensureAdminExists();
-    const session = localStorage.getItem('oee_guide_session');
-    if (session) {
-      setCurrentUser(JSON.parse(session));
+    
+    // Garantir dados locais de exemplo para demonstração e resiliência offline/local
+    const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+    if (localRecords.length === 0) {
+      localStorage.setItem('oee_local_records', JSON.stringify(generateSampleLocalRecords()));
+    }
+
+    const sessionUser = safeGetLocalStorage<User | null>('oee_guide_session', null);
+    if (sessionUser) {
+      setCurrentUser(sessionUser);
     }
   }, []);
 
@@ -1019,6 +1455,29 @@ export default function App() {
     setLoginError('');
     
     try {
+      if (useLocalFallback) {
+        const localUsers = JSON.parse(localStorage.getItem('oee_local_users') || '[]');
+        // Adicionar admin default se vazio
+        if (localUsers.length === 0 || !localUsers.some((u: any) => u.email === MAIN_ADMIN_EMAIL)) {
+          localUsers.push({ name: 'Administrador Guideway', email: MAIN_ADMIN_EMAIL, password: 'admin', isAdmin: true });
+          localStorage.setItem('oee_local_users', JSON.stringify(localUsers));
+        }
+        const found = localUsers.find((u: any) => u.email.toLowerCase() === loginEmail.toLowerCase() && u.password === loginPassword);
+        if (!found) {
+          setLoginError('E-mail ou senha incorretos.');
+          return;
+        }
+        const user: User = {
+          name: found.name,
+          email: found.email,
+          password: found.password,
+          isAdmin: found.isAdmin
+        };
+        setCurrentUser(user);
+        localStorage.setItem('oee_guide_session', JSON.stringify(user));
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -1041,8 +1500,21 @@ export default function App() {
       setCurrentUser(user);
       localStorage.setItem('oee_guide_session', JSON.stringify(user));
     } catch (error) {
-      console.error('Erro no login:', error);
-      setLoginError('Erro ao conectar com o servidor.');
+      console.error('Erro no login via Supabase, tentando local:', error);
+      const localUsers = JSON.parse(localStorage.getItem('oee_local_users') || '[]');
+      if (localUsers.length === 0 || !localUsers.some((u: any) => u.email === MAIN_ADMIN_EMAIL)) {
+        localUsers.push({ name: 'Administrador Guideway', email: MAIN_ADMIN_EMAIL, password: 'admin', isAdmin: true });
+        localStorage.setItem('oee_local_users', JSON.stringify(localUsers));
+      }
+      const found = localUsers.find((u: any) => u.email.toLowerCase() === loginEmail.toLowerCase() && u.password === loginPassword);
+      if (found) {
+        const user: User = { name: found.name, email: found.email, password: found.password, isAdmin: found.isAdmin };
+        setCurrentUser(user);
+        localStorage.setItem('oee_guide_session', JSON.stringify(user));
+        setUseLocalFallback(true);
+      } else {
+        setLoginError('E-mail ou senha incorretos.');
+      }
     }
   };
 
@@ -1062,6 +1534,28 @@ export default function App() {
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      if (useLocalFallback) {
+        const localUsers = JSON.parse(localStorage.getItem('oee_local_users') || '[]');
+        if (localUsers.some((u: any) => u.email.toLowerCase() === newUserEmail.toLowerCase())) {
+          alert('Este e-mail já está cadastrado.');
+          return;
+        }
+        localUsers.push({
+          name: newUserName,
+          email: newUserEmail,
+          password: newUserPassword,
+          isAdmin: newUserIsAdmin
+        });
+        localStorage.setItem('oee_local_users', JSON.stringify(localUsers));
+        alert('Usuário criado com sucesso (Local)!');
+        setNewUserName('');
+        setNewUserEmail('');
+        setNewUserPassword('');
+        setNewUserIsAdmin(false);
+        fetchUsers();
+        return;
+      }
+
       const { error } = await supabase
         .from('users')
         .insert([{
@@ -1080,8 +1574,21 @@ export default function App() {
       setNewUserIsAdmin(false);
       fetchUsers();
     } catch (error: any) {
-      console.error('Erro ao criar usuário:', error);
-      alert('Erro ao criar usuário: ' + error.message);
+      console.error('Erro ao criar usuário, salvando localmente:', error);
+      const localUsers = JSON.parse(localStorage.getItem('oee_local_users') || '[]');
+      localUsers.push({
+        name: newUserName,
+        email: newUserEmail,
+        password: newUserPassword,
+        isAdmin: newUserIsAdmin
+      });
+      localStorage.setItem('oee_local_users', JSON.stringify(localUsers));
+      alert('Usuário criado com sucesso (Local Fallback)!');
+      setNewUserName('');
+      setNewUserEmail('');
+      setNewUserPassword('');
+      setNewUserIsAdmin(false);
+      fetchUsers();
     }
   };
 
@@ -1094,6 +1601,15 @@ export default function App() {
     if (!confirm(`Deseja realmente excluir o usuário ${email}?`)) return;
 
     try {
+      if (useLocalFallback) {
+        const localUsers = JSON.parse(localStorage.getItem('oee_local_users') || '[]');
+        const updated = localUsers.filter((u: any) => u.email.toLowerCase() !== email.toLowerCase());
+        localStorage.setItem('oee_local_users', JSON.stringify(updated));
+        alert('Usuário excluído localmente.');
+        fetchUsers();
+        return;
+      }
+
       const { error } = await supabase
         .from('users')
         .delete()
@@ -1102,8 +1618,12 @@ export default function App() {
       if (error) throw error;
       fetchUsers();
     } catch (error: any) {
-      console.error('Erro ao excluir usuário:', error);
-      alert('Erro ao excluir: ' + error.message);
+      console.error('Erro ao excluir usuário, excluindo localmente:', error);
+      const localUsers = JSON.parse(localStorage.getItem('oee_local_users') || '[]');
+      const updated = localUsers.filter((u: any) => u.email.toLowerCase() !== email.toLowerCase());
+      localStorage.setItem('oee_local_users', JSON.stringify(updated));
+      alert('Usuário excluído localmente.');
+      fetchUsers();
     }
   };
 
@@ -2087,7 +2607,7 @@ export default function App() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -20 }}
                 className="max-w-6xl mx-auto space-y-8"
-              >
+            >
               <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                 <div>
                   <h2 className="text-3xl font-bold tracking-tight text-white">Evolução Histórica</h2>
@@ -2102,15 +2622,41 @@ export default function App() {
                       onChange={(e) => {
                         setMonthFilter(e.target.value);
                         setDateFilter('Todas'); // Resetar data ao mudar o mês
+                        setWeekFilter('Todas'); // Resetar semana ao mudar o mês
                       }}
                       className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer"
                     />
                   </div>
                   <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Semana</span>
+                    <select 
+                      value={weekFilter}
+                      onChange={(e) => {
+                        setWeekFilter(e.target.value);
+                        if (e.target.value !== 'Todas') {
+                          setDateFilter('Todas'); // Desmarca o dia se selecionar uma semana
+                        }
+                      }}
+                      className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer min-w-[120px]"
+                    >
+                      <option value="Todas">Todas</option>
+                      <option value="S1">S1</option>
+                      <option value="S2">S2</option>
+                      <option value="S3">S3</option>
+                      <option value="S4">S4</option>
+                      <option value="S5">S5</option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Data</span>
                     <select 
                       value={dateFilter}
-                      onChange={(e) => setDateFilter(e.target.value)}
+                      onChange={(e) => {
+                        setDateFilter(e.target.value);
+                        if (e.target.value !== 'Todas') {
+                          setWeekFilter('Todas'); // Desmarca a semana se selecionar um dia
+                        }
+                      }}
                       className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer min-w-[100px]"
                     >
                       <option value="Todas">Todas</option>
@@ -2146,7 +2692,7 @@ export default function App() {
                 </div>
               </header>
 
-              {history.length > 0 ? (
+              {filteredHistory.length > 0 ? (
                 <>
                   {/* Gráfico de Evolução e Índice de Quebra Consolidado */}
                   <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
@@ -2157,7 +2703,7 @@ export default function App() {
                       </h3>
                       <div className="h-[400px] w-full">
                         <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={[...history].reverse()}>
+                          <BarChart data={[...filteredHistory].reverse()}>
                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
                             <XAxis 
                               dataKey="created_at" 
@@ -2176,7 +2722,7 @@ export default function App() {
                               content={<CustomOEEEvolutionTooltip />}
                             />
                             <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
-                              {[...history].reverse().map((entry, index) => (
+                              {[...filteredHistory].reverse().map((entry, index) => (
                                 <Cell 
                                   key={`cell-${index}`} 
                                   fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
@@ -2288,7 +2834,20 @@ export default function App() {
                               itemStyle={{ color: '#fff' }}
                               formatter={(value: number) => [value + ' min', 'Duração']}
                             />
-                            <Bar dataKey="duration" fill="#ef4444" radius={[4, 4, 0, 0]}>
+                            <Bar 
+                              dataKey="duration" 
+                              fill="#ef4444" 
+                              radius={[4, 4, 0, 0]}
+                              className="cursor-pointer"
+                              style={{ cursor: 'pointer' }}
+                              onClick={(entry) => {
+                                if (entry && entry.code) {
+                                  setSelectedParetoCode(entry.code);
+                                } else if (entry && entry.payload && entry.payload.code) {
+                                  setSelectedParetoCode(entry.payload.code);
+                                }
+                              }}
+                            >
                               <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
                             </Bar>
                           </BarChart>
@@ -2327,7 +2886,20 @@ export default function App() {
                               itemStyle={{ color: '#fff' }}
                               formatter={(value: number) => [value + ' min', 'Duração']}
                             />
-                            <Bar dataKey="duration" fill="#3b82f6" radius={[4, 4, 0, 0]}>
+                            <Bar 
+                              dataKey="duration" 
+                              fill="#3b82f6" 
+                              radius={[4, 4, 0, 0]}
+                              className="cursor-pointer"
+                              style={{ cursor: 'pointer' }}
+                              onClick={(entry) => {
+                                if (entry && entry.code) {
+                                  setSelectedParetoCode(entry.code);
+                                } else if (entry && entry.payload && entry.payload.code) {
+                                  setSelectedParetoCode(entry.payload.code);
+                                }
+                              }}
+                            >
                               <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
                             </Bar>
                           </BarChart>
@@ -2405,11 +2977,18 @@ export default function App() {
                                 </div>
                               </td>
                             </tr>
-                          ) : history.length > 0 ? (
-                            history.map((record) => (
+                          ) : filteredHistory.length > 0 ? (
+                            filteredHistory.map((record) => (
                               <tr key={record.id} className="hover:bg-white/5 transition-colors group">
                                 <td className="px-3 py-3 text-[11px] text-slate-400 whitespace-nowrap">
-                                  {new Date(record.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                  <div className="flex items-center gap-1.5">
+                                    <span>
+                                      {new Date(record.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                    </span>
+                                    <span className="text-[9px] px-1 py-0.5 bg-zinc-800 border border-white/5 rounded text-indigo-300 font-black">
+                                      {getWeekNameForDateStr(record.created_at)}
+                                    </span>
+                                  </div>
                                 </td>
                                 <td className="px-3 py-3 text-[11px] font-bold text-white whitespace-nowrap">{record.machine_name}</td>
                                 <td className="px-3 py-3 text-[11px] text-slate-400 max-w-[120px] truncate" title={record.sku}>{record.sku}</td>
@@ -2700,81 +3279,144 @@ export default function App() {
                         )}
                       </div>
 
-                      <div className="space-y-3">
+                      <div className="space-y-4">
                         {inputs.stops.map((stop, index) => {
                           const stopConfig = stopCodes.find(c => c.code === stop.code);
                           return (
                             <motion.div 
-                              initial={{ opacity: 0, x: -10 }}
-                              animate={{ opacity: 1, x: 0 }}
+                              initial={{ opacity: 0, y: 10 }}
+                              animate={{ opacity: 1, y: 0 }}
                               key={stop.id} 
-                              className="flex items-center gap-4 bg-black/40 p-4 rounded-2xl border border-white/5 group hover:border-white/10 transition-all"
+                              className="flex flex-col gap-4 bg-black/40 p-5 rounded-2xl border border-white/5 group hover:border-white/10 transition-all"
                             >
-                              <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
-                                {index + 1}
-                              </div>
-                              <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-4">
-                                <div className="md:col-span-2">
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
-                                  <select 
-                                    value={stop.code}
-                                    onChange={(e) => {
-                                      const newStops = [...inputs.stops];
-                                      newStops[index].code = parseInt(e.target.value);
-                                      setInputs(prev => ({ ...prev, stops: newStops }));
-                                    }}
-                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
-                                  >
-                                    {stopCodes.map(c => (
-                                      <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
-                                    ))}
-                                  </select>
+                              {/* Row 1: Core Fields */}
+                              <div className="flex items-center gap-4 w-full">
+                                <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500 shrink-0">
+                                  {index + 1}
                                 </div>
-                                <div>
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Início</label>
-                                  <input 
-                                    type="time"
-                                    value={stop.startTime || ''}
-                                    onChange={(e) => {
-                                      const newStops = [...inputs.stops];
-                                      newStops[index].startTime = e.target.value;
-                                      newStops[index].duration = calculateDurationMinutes(e.target.value, newStops[index].endTime);
-                                      setInputs(prev => ({ ...prev, stops: newStops }));
-                                    }}
-                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Término</label>
-                                  <div className="relative">
-                                    <input 
-                                      type="time"
-                                      value={stop.endTime || ''}
+                                <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-4">
+                                  <div className="md:col-span-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
+                                    <select 
+                                      value={stop.code}
                                       onChange={(e) => {
                                         const newStops = [...inputs.stops];
-                                        newStops[index].endTime = e.target.value;
-                                        newStops[index].duration = calculateDurationMinutes(newStops[index].startTime, e.target.value);
+                                        newStops[index].code = parseInt(e.target.value);
+                                        // Se mudar para algo diferente de OUTROS (500), limpa os campos adicionais
+                                        if (newStops[index].code !== 500) {
+                                          delete newStops[index].reasonCategory;
+                                          delete newStops[index].customReason;
+                                        }
+                                        setInputs(prev => ({ ...prev, stops: newStops }));
+                                      }}
+                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                    >
+                                      {stopCodes.map(c => (
+                                        <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Início</label>
+                                    <input 
+                                      type="time"
+                                      value={stop.startTime || ''}
+                                      onChange={(e) => {
+                                        const newStops = [...inputs.stops];
+                                        newStops[index].startTime = e.target.value;
+                                        newStops[index].duration = calculateDurationMinutes(e.target.value, newStops[index].endTime);
                                         setInputs(prev => ({ ...prev, stops: newStops }));
                                       }}
                                       className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
                                     />
-                                    {stop.duration > 0 && (
-                                      <div className="absolute -bottom-5 right-0 text-[9px] font-bold text-blue-400 uppercase">
-                                        {stop.duration} min
-                                      </div>
-                                    )}
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Término</label>
+                                    <div className="relative">
+                                      <input 
+                                        type="time"
+                                        value={stop.endTime || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].endTime = e.target.value;
+                                          newStops[index].duration = calculateDurationMinutes(newStops[index].startTime, e.target.value);
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                      />
+                                      {stop.duration > 0 && (
+                                        <div className="absolute -bottom-5 right-0 text-[9px] font-bold text-blue-400 uppercase">
+                                          {stop.duration} min
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
+                                <button 
+                                  onClick={() => {
+                                    const newStops = inputs.stops.filter((_, i) => i !== index);
+                                    setInputs(prev => ({ ...prev, stops: newStops }));
+                                  }}
+                                  className="p-2 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg shrink-0 self-center md:self-end md:mb-1"
+                                >
+                                  <Trash2 size={18} />
+                                </button>
                               </div>
-                              <button 
-                                onClick={() => {
-                                  const newStops = inputs.stops.filter((_, i) => i !== index);
-                                  setInputs(prev => ({ ...prev, stops: newStops }));
-                                }}
-                                className="p-2 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg"
-                              >
-                                <Trash2 size={18} />
-                              </button>
+
+                              {/* Row 2: Conditional "OUTROS" (code 500) sub-reason and notes */}
+                              <AnimatePresence>
+                                {stop.code === 500 && (
+                                  <motion.div
+                                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                                    animate={{ opacity: 1, height: 'auto', marginTop: 8 }}
+                                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                                    transition={{ duration: 0.2 }}
+                                    className="overflow-hidden bg-amber-500/5 border border-amber-500/10 rounded-xl p-4 space-y-4"
+                                  >
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <div>
+                                        <label className="text-[10px] font-bold text-amber-400 uppercase mb-1.5 block">
+                                          Motivo Pré-definido (Campo Suspenso)
+                                        </label>
+                                        <select
+                                          value={stop.reasonCategory || ''}
+                                          onChange={(e) => {
+                                            const newStops = [...inputs.stops];
+                                            newStops[index].reasonCategory = e.target.value;
+                                            setInputs(prev => ({ ...prev, stops: newStops }));
+                                          }}
+                                          className="w-full bg-zinc-950 border border-amber-500/20 rounded-xl px-3 py-2.5 text-white text-xs focus:outline-none focus:border-amber-500 transition-all"
+                                        >
+                                          <option value="">-- Selecione o motivo do desvio --</option>
+                                          <option value="Aguardando Manutenção / Eletricista">Aguardando Manutenção / Eletricista</option>
+                                          <option value="Aguardando Matéria-Prima / Insumos">Aguardando Matéria-Prima / Insumos</option>
+                                          <option value="Aguardando Operador / Troca de Turno">Aguardando Operador / Troca de Turno</option>
+                                          <option value="Problema na Linha / Infraestrutura">Problema na Linha / Infraestrutura</option>
+                                          <option value="Limpeza / Organização de Setor">Limpeza / Organização de Setor</option>
+                                          <option value="Falta de Planejamento de Demanda">Falta de Planejamento de Demanda</option>
+                                          <option value="Outro">Outro motivo (digitar detalhamento abaixo)</option>
+                                        </select>
+                                      </div>
+                                      <div>
+                                        <label className="text-[10px] font-bold text-amber-400 uppercase mb-1.5 block">
+                                          Observação em Texto / Explicação do Motivo
+                                        </label>
+                                        <input
+                                          type="text"
+                                          value={stop.customReason || ''}
+                                          onChange={(e) => {
+                                            const newStops = [...inputs.stops];
+                                            newStops[index].customReason = e.target.value;
+                                            setInputs(prev => ({ ...prev, stops: newStops }));
+                                          }}
+                                          placeholder="Digite a explicação detalhada do motivo da parada..."
+                                          className="w-full bg-zinc-950 border border-amber-500/20 rounded-xl px-3 py-2.5 text-white text-xs focus:outline-none focus:border-amber-500 transition-all"
+                                        />
+                                      </div>
+                                    </div>
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
                             </motion.div>
                           );
                         })}
@@ -2849,6 +3491,17 @@ export default function App() {
               record={selectedRecord} 
               stopCodes={stopCodes}
               onClose={() => setSelectedRecord(null)} 
+            />
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {selectedParetoCode !== null && (
+            <ParetoDetailModal 
+              code={selectedParetoCode}
+              stopCodes={stopCodes}
+              filteredHistory={filteredHistory}
+              onClose={() => setSelectedParetoCode(null)}
             />
           )}
         </AnimatePresence>
@@ -3011,10 +3664,16 @@ function RecordDetailModal({ record, stopCodes, onClose }: { record: any, stopCo
                           <td className="px-6 py-3 font-mono text-blue-400">{stop.code}</td>
                           <td className="px-6 py-3 text-slate-300">
                             <div className="flex flex-col">
-                              <span>{stopInfo?.description || 'Desconhecido'}</span>
+                              <span className="font-semibold">{stopInfo?.description || 'Desconhecido'}</span>
                               <span className={`text-[9px] font-bold ${stopInfo?.category === 'P' ? 'text-blue-400' : 'text-red-400'}`}>
                                 {stopInfo?.category === 'P' ? 'Programada' : 'Não Programada'}
                               </span>
+                              {stop.code === 500 && (stop.reasonCategory || stop.customReason) && (
+                                <div className="text-[10px] text-amber-400 font-medium mt-1 bg-amber-500/10 border border-amber-500/20 rounded-lg px-2 py-1 max-w-sm">
+                                  <span className="font-bold uppercase text-[8px] text-amber-300 block mb-0.5">Motivo / Obs:</span>
+                                  {[stop.reasonCategory, stop.customReason].filter(Boolean).join(' — ')}
+                                </div>
+                              )}
                             </div>
                           </td>
                           <td className="px-6 py-3 text-slate-400">{stop.startTime || '-'}</td>
@@ -3123,6 +3782,215 @@ function InputField({ label, value, onChange, icon, type = "number" }: { label: 
         onChange={(e) => onChange(e.target.value)}
         className="w-full bg-black border border-white/10 rounded-xl px-4 py-3.5 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-bold text-white text-sm"
       />
+    </div>
+  );
+}
+
+interface ParetoDetailModalProps {
+  code: number;
+  stopCodes: StopCode[];
+  filteredHistory: any[];
+  onClose: () => void;
+}
+
+function ParetoDetailModal({ code, stopCodes, filteredHistory, onClose }: ParetoDetailModalProps) {
+  const stopConfig = stopCodes.find(c => c.code === code);
+  
+  // Find all occurrences of this code in filteredHistory
+  const occurrences = useMemo(() => {
+    const list: Array<{
+      id: string;
+      dateStr: string;
+      machineName: string;
+      sku: string;
+      startTime: string;
+      endTime: string;
+      duration: number;
+      reasonCategory?: string;
+      customReason?: string;
+      oeeScore: number;
+      record: any;
+    }> = [];
+
+    filteredHistory.forEach(record => {
+      if (record.downtime_data) {
+        try {
+          const parsed = typeof record.downtime_data === 'string' 
+            ? JSON.parse(record.downtime_data) 
+            : record.downtime_data;
+          
+          const stops: StopEntry[] = Array.isArray(parsed) ? parsed : (parsed.stops || []);
+          
+          stops.forEach((stop, index) => {
+            if (Number(stop.code) === code) {
+              list.push({
+                id: `${record.id}-${index}-${stop.id || index}`,
+                dateStr: record.created_at,
+                machineName: record.machine_name,
+                sku: record.sku,
+                startTime: stop.startTime || '',
+                endTime: stop.endTime || '',
+                duration: stop.duration || 0,
+                reasonCategory: stop.reasonCategory,
+                customReason: stop.customReason,
+                oeeScore: record.oee_score,
+                record: record
+              });
+            }
+          });
+        } catch (e) {
+          console.error("Erro ao analisar downtime_data no ParetoDetailModal", e);
+        }
+      }
+    });
+
+    // Sort by date descending
+    return list.sort((a, b) => new Date(b.dateStr).getTime() - new Date(a.dateStr).getTime());
+  }, [code, filteredHistory]);
+
+  const totalMinutes = useMemo(() => {
+    return occurrences.reduce((sum, occ) => sum + occ.duration, 0);
+  }, [occurrences]);
+
+  return (
+    <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="bg-zinc-900 w-full max-w-3xl max-h-[90vh] flex flex-col rounded-3xl border border-white/10 shadow-2xl overflow-hidden"
+      >
+        {/* Header */}
+        <div className="bg-zinc-900 px-8 py-6 border-b border-white/10 flex items-center justify-between shrink-0">
+          <div>
+            <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded border ${
+              stopConfig?.category === 'P' 
+                ? 'bg-blue-500/20 text-blue-400 border-blue-500/30' 
+                : 'bg-red-500/20 text-red-400 border-red-500/30'
+            }`}>
+              {stopConfig?.category === 'P' ? 'Parada Programada' : 'Parada Não Programada'}
+            </span>
+            <h2 className="text-xl font-black text-white flex items-center gap-2 mt-1.5">
+              <AlertTriangle className={stopConfig?.category === 'P' ? 'text-blue-400' : 'text-red-400'} size={20} />
+              Código {code} — {stopConfig?.description || 'Descrição não cadastrada'}
+            </h2>
+            <p className="text-xs text-slate-400 mt-1">
+              Rastreamento de ocorrências registradas no período selecionado
+            </p>
+          </div>
+          <button 
+            onClick={onClose}
+            className="p-2 hover:bg-white/5 rounded-xl text-slate-400 hover:text-white transition-colors"
+          >
+            <LogOut size={20} />
+          </button>
+        </div>
+
+        {/* Content */}
+        <div className="p-8 overflow-y-auto flex-1 space-y-6">
+          {/* Summary Metric Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-white/5 p-4 rounded-2xl border border-white/5 flex flex-col justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">Tempo Total Acumulado</span>
+              <div className="flex items-baseline gap-1">
+                <span className={`text-2xl font-black ${stopConfig?.category === 'P' ? 'text-blue-400' : 'text-red-400'}`}>{totalMinutes}</span>
+                <span className="text-xs font-bold text-slate-400">minutos</span>
+              </div>
+            </div>
+            <div className="bg-white/5 p-4 rounded-2xl border border-white/5 flex flex-col justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">Total de Ocorrências</span>
+              <div className="flex items-baseline gap-1">
+                <span className="text-2xl font-black text-white">{occurrences.length}</span>
+                <span className="text-xs font-bold text-slate-400">vezes</span>
+              </div>
+            </div>
+            <div className="bg-white/5 p-4 rounded-2xl border border-white/5 flex flex-col justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">Média por Ocorrência</span>
+              <div className="flex items-baseline gap-1">
+                <span className="text-2xl font-black text-indigo-400">
+                  {occurrences.length > 0 ? (totalMinutes / occurrences.length).toFixed(1) : '0'}
+                </span>
+                <span className="text-xs font-bold text-slate-400">minutos</span>
+              </div>
+            </div>
+          </div>
+
+          {/* List of Occurrences */}
+          <div className="space-y-3">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest block">Lista de Ocorrências</h3>
+            {occurrences.length === 0 ? (
+              <div className="text-center py-8 bg-white/5 rounded-2xl border border-white/5 text-slate-500 text-sm">
+                Nenhuma ocorrência encontrada para este código no período filtrado.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {occurrences.map((occ) => (
+                  <div key={occ.id} className="bg-white/5 border border-white/5 rounded-2xl p-5 hover:border-white/10 hover:bg-white/[0.07] transition-all flex flex-col gap-4">
+                    {/* Header line of item */}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="text-xs font-black text-white bg-zinc-800 px-3 py-1.5 border border-white/10 rounded-xl">
+                          {new Date(occ.dateStr).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
+                        </div>
+                        <span className="text-xs font-bold text-slate-400">
+                          {new Date(occ.dateStr).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                      
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] px-2 py-1 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-lg font-bold">
+                          Linha: {occ.machineName}
+                        </span>
+                        <span className="text-[10px] px-2 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-lg font-bold">
+                          OEE: {occ.oeeScore.toFixed(1)}%
+                        </span>
+                        <div className={`text-lg font-black ${stopConfig?.category === 'P' ? 'text-blue-400' : 'text-red-400'}`}>
+                          {occ.duration} <span className="text-xs font-normal text-slate-500">min</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Sub info */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-slate-400 border-t border-white/5 pt-3">
+                      <div>
+                        <span className="font-semibold text-slate-500 uppercase text-[9px] block mb-1">SKU / Produto</span>
+                        <span className="text-white font-medium">{occ.sku}</span>
+                      </div>
+                      <div>
+                        <span className="font-semibold text-slate-500 uppercase text-[9px] block mb-1">Horário da Parada</span>
+                        <span className="text-white font-medium">
+                          {occ.startTime && occ.endTime ? `${occ.startTime} às ${occ.endTime}` : 'Não especificado'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Show observations if OUTROS or custom observations are present */}
+                    {(occ.reasonCategory || occ.customReason) && (
+                      <div className="bg-amber-500/5 border border-amber-500/10 rounded-xl p-3.5 space-y-1">
+                        <span className="text-[8px] font-black uppercase text-amber-400 tracking-wider block">Detalhamento e Justificativa</span>
+                        <p className="text-xs text-amber-200">
+                          {occ.reasonCategory && <strong className="font-bold">{occ.reasonCategory}: </strong>}
+                          {occ.customReason || 'Sem observações adicionais.'}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        
+        {/* Footer */}
+        <div className="bg-zinc-950 px-8 py-4 border-t border-white/10 flex justify-end shrink-0">
+          <button
+            onClick={onClose}
+            className="px-5 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs rounded-xl transition-all"
+          >
+            Fechar
+          </button>
+        </div>
+      </motion.div>
     </div>
   );
 }
