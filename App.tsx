@@ -38,17 +38,19 @@ import {
   Box,
   Cpu,
   Search,
-  ArrowRight
+  ArrowRight,
+  Hash,
+  Pencil
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { supabase } from '@/lib/supabase';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
 // Error Boundary Component
-class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
+export class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
   constructor(props: any) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -87,12 +89,58 @@ class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasErr
   }
 }
 
+// Custom Tooltip for OEE Evolution Chart
+const CustomOEEEvolutionTooltip = ({ active, payload, label }: any) => {
+  if (active && payload && payload.length) {
+    const oee = payload[0].value;
+    const color = oee >= 85 ? '#10b981' : oee >= 65 ? '#3b82f6' : '#ef4444';
+    return (
+      <div className="bg-zinc-900 border border-white/10 p-3 rounded-xl shadow-xl">
+        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">
+          {new Date(label).toLocaleString('pt-BR')}
+        </p>
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+          <p className="text-sm font-bold" style={{ color }}>
+            OEE: {oee.toFixed(1)}%
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return null;
+};
+
 // Types for our OEE data
 interface StopEntry {
   id: string;
   code: number;
-  duration: number; // minutos
+  startTime: string; // HH:mm
+  endTime: string;   // HH:mm
+  duration: number;  // minutos (calculado)
+  reasonCategory?: string; // Categoria do Motivo para OUTROS
+  customReason?: string;   // Observação personalizada para OUTROS
 }
+
+// Helper to calculate duration in minutes between two HH:mm strings
+const calculateDurationMinutes = (start: string, end: string): number => {
+  if (!start || !end) return 0;
+  
+  const [startH, startM] = start.split(':').map(Number);
+  const [endH, endM] = end.split(':').map(Number);
+  
+  if (isNaN(startH) || isNaN(startM) || isNaN(endH) || isNaN(endM)) return 0;
+  
+  let startTotal = startH * 60 + startM;
+  let endTotal = endH * 60 + endM;
+  
+  // Handle overnight stops (e.g., 23:00 to 01:00)
+  if (endTotal < startTotal) {
+    endTotal += 24 * 60;
+  }
+  
+  return endTotal - startTotal;
+};
 
 interface OEEInputs {
   date: string; // Data do Relatório
@@ -106,9 +154,19 @@ interface OEEInputs {
   K: number; // Turnos de Produção
   stops: StopEntry[]; // Paradas detalhadas
   U: number; // Perda por Qualidade (garrafas)
+  shiftStartTime: string; // HORA INÍCIO DO TURNO
+  shiftEndTime: string;   // HORA DO TÉRMINO DO TURNO
+  initialCounter: number; // CONTADOR INICIAL
+  finalCounter: number;   // CONTADOR FINAL
 }
 
-const STOP_CODES = [
+interface StopCode {
+  code: number;
+  description: string;
+  category: 'P' | 'NP';
+}
+
+const DEFAULT_STOP_CODES: StopCode[] = [
   { code: 1, description: 'Problema no RINSER', category: 'NP' },
   { code: 2, description: 'Problema na ENCHEDORA', category: 'NP' },
   { code: 3, description: 'Problema no ROSQUEADOR', category: 'NP' },
@@ -119,6 +177,8 @@ const STOP_CODES = [
   { code: 31, description: 'SOPRADORA', category: 'NP' },
   { code: 32, description: 'ROTULADORA', category: 'NP' },
   { code: 33, description: 'EMPACOTADORA', category: 'NP' },
+  { code: 34, description: 'TROCA DE RÓTULO (Rótulo)', category: 'NP' },
+  { code: 35, description: 'TROCA DE BOBINA DE FILME (Empacotadora)', category: 'NP' },
   { code: 41, description: 'FALTA DE ÁGUA', category: 'NP' },
   { code: 42, description: 'FALTA DE ENERGIA', category: 'NP' },
   { code: 43, description: 'FALTA DE AR COMPRIMIDO', category: 'NP' },
@@ -159,6 +219,9 @@ interface OEEResults {
   performance: number;
   qualidade: number;
   oee: number;
+  maintenanceIndex: number;
+  teep: number;
+  productivity: number;
 }
 
 // Types for Authentication
@@ -175,15 +238,97 @@ interface User {
 const MAIN_ADMIN_EMAIL = 'josemarcelolustosa@gmail.com';
 // ---------------------------------------------------------------
 
+// Safe localStorage helper to prevent JSON parsing crashes
+const safeGetLocalStorage = <T,>(key: string, defaultValue: T): T => {
+  try {
+    const item = localStorage.getItem(key);
+    if (!item || item === 'undefined' || item === 'null') {
+      return defaultValue;
+    }
+    return JSON.parse(item) as T;
+  } catch (e) {
+    console.warn(`Erro ao ler/parsear a chave "${key}" do localStorage:`, e);
+    try {
+      localStorage.removeItem(key); // Remove para evitar erros subsequentes
+    } catch (_) {}
+    return defaultValue;
+  }
+};
+
+const generateSampleLocalRecords = () => {
+  const records = [];
+  const lines = ['Linha 01', 'Linha 02'];
+  const skus = ['Água Mineral 500ml', 'Água Mineral 1.5L', 'Água com Gás 500ml'];
+  
+  const today = new Date();
+  
+  for (let i = 10; i >= 0; i--) {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i, 12, 0, 0);
+    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    
+    // Variar um pouco os valores para ficar realista
+    const avail = 75 + Math.random() * 20;
+    const perf = 80 + Math.random() * 18;
+    const qual = 95 + Math.random() * 4.9;
+    
+    const calculatedOee = (avail/100) * (perf/100) * (qual/100) * 100;
+    const line = lines[Math.floor(Math.random() * lines.length)];
+    const sku = skus[Math.floor(Math.random() * skus.length)];
+    
+    const sampleInputs: OEEInputs = {
+      date: dateStr,
+      sku: sku,
+      line: line,
+      A: 24,
+      B: 80,
+      C: 12,
+      D: 22000,
+      H: Math.floor(8000 + Math.random() * 4000),
+      K: 2,
+      stops: [
+        { id: 's1', code: 101, startTime: '12:00', endTime: '13:00', duration: 60 },
+        { id: 's2', code: 2, startTime: '15:30', endTime: '16:00', duration: 30 }
+      ],
+      U: Math.floor(Math.random() * 100),
+      shiftStartTime: '06:00',
+      shiftEndTime: '22:00',
+      initialCounter: 0,
+      finalCounter: 120000
+    };
+    
+    records.push({
+      id: 'local-sample-' + i,
+      created_at: date.toISOString(),
+      machine_name: line,
+      sku: sku,
+      availability: avail,
+      performance: perf,
+      quality: qual,
+      oee_score: calculatedOee,
+      shift: 'Turnos: 2',
+      notes: `Produção Real: ${sampleInputs.H}`,
+      downtime_data: JSON.stringify(sampleInputs)
+    });
+  }
+  return records;
+};
+
 export default function App() {
+  const [useLocalFallback, setUseLocalFallback] = useState(!isSupabaseConfigured);
   // Auth State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [showAdminPanel, setShowAdminPanel] = useState(false);
+  const [adminTab, setAdminTab] = useState<'users' | 'stops'>('users');
   const [users, setUsers] = useState<User[]>([]);
+  const [stopCodes, setStopCodes] = useState<StopCode[]>(DEFAULT_STOP_CODES);
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+  const [isLoadingStops, setIsLoadingStops] = useState(false);
+  const [editingStop, setEditingStop] = useState<StopCode | null>(null);
+  const [newStop, setNewStop] = useState<Partial<StopCode>>({ category: 'NP' });
 
   // Initial state based on the provided example image
   const [inputs, setInputs] = useState<OEEInputs>(() => {
@@ -200,7 +345,11 @@ export default function App() {
       H: 10000,
       K: 2,
       stops: [],
-      U: 2500
+      U: 0,
+      shiftStartTime: '06:00',
+      shiftEndTime: '22:00',
+      initialCounter: 0,
+      finalCounter: 120000
     };
   });
 
@@ -215,16 +364,34 @@ export default function App() {
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lineFilter, setLineFilter] = useState<string>('Todas');
   const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
+  const [dateFilter, setDateFilter] = useState<string>('Todas');
 
   // Buscar o último registro geral para inicializar o Dashboard
   const fetchLatestRecord = async () => {
     if (!currentUser) return;
     setIsFetchingDashboard(true);
     try {
+      if (useLocalFallback) {
+        const localRecordsStr = localStorage.getItem('oee_local_records');
+        const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+        if (localRecords.length > 0) {
+          localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+          const latest = localRecords[0];
+          const d = new Date(latest.created_at);
+          const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          setDashboardDate(recordDate);
+          setDashboardLine(latest.machine_name);
+          setDashboardRecord(latest);
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('oee_records')
         .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
@@ -244,7 +411,19 @@ export default function App() {
         setDashboardRecord(latest);
       }
     } catch (err) {
-      console.error('Erro ao buscar último registro para o dashboard:', err);
+      console.error('Erro ao buscar último registro para o dashboard, migrando para modo local:', err);
+      setUseLocalFallback(true);
+      const localRecordsStr = localStorage.getItem('oee_local_records');
+      const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+      if (localRecords.length > 0) {
+        localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        const latest = localRecords[0];
+        const d = new Date(latest.created_at);
+        const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        setDashboardDate(recordDate);
+        setDashboardLine(latest.machine_name);
+        setDashboardRecord(latest);
+      }
     } finally {
       setIsFetchingDashboard(false);
     }
@@ -253,6 +432,21 @@ export default function App() {
   // Buscar usuários do Supabase (Apenas para ADM)
   const ensureAdminExists = async () => {
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        const adminExists = localUsers.some(u => u.email === MAIN_ADMIN_EMAIL);
+        if (!adminExists) {
+          const newAdmin = {
+            name: 'Administrador Guideway',
+            email: MAIN_ADMIN_EMAIL,
+            password: 'admin',
+            is_admin: true
+          };
+          localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, newAdmin]));
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('email')
@@ -277,6 +471,17 @@ export default function App() {
     if (!currentUser?.isAdmin) return;
     setIsLoadingUsers(true);
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        setUsers(localUsers.map(u => ({
+          name: u.name,
+          email: u.email,
+          password: u.password,
+          isAdmin: u.is_admin
+        })));
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -290,22 +495,169 @@ export default function App() {
         isAdmin: u.is_admin
       })));
     } catch (error: any) {
-      console.error('Erro ao buscar usuários:', error);
+      console.error('Erro ao buscar usuários, migrando para local:', error);
+      setUseLocalFallback(true);
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      setUsers(localUsers.map(u => ({
+        name: u.name,
+        email: u.email,
+        password: u.password,
+        isAdmin: u.is_admin
+      })));
     } finally {
       setIsLoadingUsers(false);
+    }
+  };
+
+  const fetchStopCodes = async () => {
+    setIsLoadingStops(true);
+    try {
+      if (useLocalFallback) {
+        const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+        setStopCodes(localStops);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('stop_codes')
+        .select('*')
+        .order('code', { ascending: true });
+      
+      if (error) {
+        if (error.code === 'PGRST116' || error.message.includes('relation "stop_codes" does not exist')) {
+          console.warn('Tabela stop_codes não existe. Usando defaults.');
+          return;
+        }
+        throw error;
+      }
+      
+      if (data && data.length > 0) {
+        setStopCodes(data.map(s => ({
+          code: s.code,
+          description: s.description,
+          category: s.category
+        })));
+      } else {
+        // Se a tabela estiver vazia, tentar popular com os defaults
+        console.log('Tabela stop_codes vazia. Populando com defaults...');
+        await supabase.from('stop_codes').insert(DEFAULT_STOP_CODES);
+        setStopCodes(DEFAULT_STOP_CODES);
+      }
+    } catch (error: any) {
+      console.error('Erro ao buscar códigos de parada, usando defaults/local:', error);
+      setUseLocalFallback(true);
+      const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+      setStopCodes(localStops);
+    } finally {
+      setIsLoadingStops(false);
+    }
+  };
+
+  const saveStopCode = async (stop: StopCode) => {
+    try {
+      if (useLocalFallback) {
+        const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+        const index = localStops.findIndex(s => s.code === stop.code);
+        if (index > -1) {
+          localStops[index] = stop;
+        } else {
+          localStops.push(stop);
+        }
+        localStorage.setItem('oee_local_stop_codes', JSON.stringify(localStops));
+        fetchStopCodes();
+        setEditingStop(null);
+        return;
+      }
+
+      const { error } = await supabase
+        .from('stop_codes')
+        .upsert([stop]);
+      
+      if (error) throw error;
+      fetchStopCodes();
+      setEditingStop(null);
+    } catch (error: any) {
+      console.error('Erro ao salvar código de parada:', error);
+      alert('Erro ao salvar: ' + error.message);
+    }
+  };
+
+  const deleteStopCode = async (code: number) => {
+    if (!confirm('Tem certeza que deseja excluir este código de parada?')) return;
+    try {
+      if (useLocalFallback) {
+        const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+        const filtered = localStops.filter(s => s.code !== code);
+        localStorage.setItem('oee_local_stop_codes', JSON.stringify(filtered));
+        fetchStopCodes();
+        return;
+      }
+
+      const { error } = await supabase
+        .from('stop_codes')
+        .delete()
+        .eq('code', code);
+      
+      if (error) throw error;
+      fetchStopCodes();
+    } catch (error: any) {
+      console.error('Erro ao excluir código de parada:', error);
+      alert('Erro ao excluir: ' + error.message);
     }
   };
 
   useEffect(() => {
     if (showAdminPanel) {
       fetchUsers();
+      fetchStopCodes();
     }
   }, [showAdminPanel]);
+
+  useEffect(() => {
+    fetchStopCodes(); // Carrega paradas logo no início para garantir que o inputs funcione
+  }, []);
 
   // Carregar histórico do Supabase
   const fetchHistory = async () => {
     setHistoryError(null);
     try {
+      if (useLocalFallback) {
+        let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        if (localRecords.length === 0) {
+          localRecords = generateSampleLocalRecords();
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+        }
+        
+        // Aplicar filtros locally
+        let filtered = [...localRecords];
+        
+        if (lineFilter !== 'Todas') {
+          filtered = filtered.filter(r => r.machine_name === lineFilter);
+        }
+        
+        // Filtro de Mês e Data
+        const year = parseInt(monthFilter.split('-')[0]);
+        const month = parseInt(monthFilter.split('-')[1]);
+        
+        filtered = filtered.filter(r => {
+          const rDate = new Date(r.created_at);
+          const rYear = rDate.getFullYear();
+          const rMonth = rDate.getMonth() + 1;
+          const rDay = rDate.getDate();
+          
+          const matchesMonth = rYear === year && rMonth === month;
+          if (dateFilter !== 'Todas') {
+            const day = parseInt(dateFilter);
+            return matchesMonth && rDay === day;
+          }
+          return matchesMonth;
+        });
+        
+        filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        setHistory(filtered.slice(0, 31));
+        return;
+      }
+
       let query = supabase
         .from('oee_records')
         .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
@@ -315,11 +667,20 @@ export default function App() {
         query = query.eq('machine_name', lineFilter);
       }
 
-      // Filtro de Mês
+      // Filtro de Mês e Data
       const year = parseInt(monthFilter.split('-')[0]);
       const month = parseInt(monthFilter.split('-')[1]);
-      const startDate = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
-      const endDate = new Date(year, month, 0, 23, 59, 59).toISOString();
+      
+      let startDate, endDate;
+      if (dateFilter !== 'Todas') {
+        const day = parseInt(dateFilter);
+        // Usar data local para o filtro
+        startDate = new Date(year, month - 1, day, 0, 0, 0).toISOString();
+        endDate = new Date(year, month - 1, day, 23, 59, 59).toISOString();
+      } else {
+        startDate = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
+        endDate = new Date(year, month, 0, 23, 59, 59).toISOString();
+      }
       
       query = query.gte('created_at', startDate).lte('created_at', endDate);
 
@@ -328,8 +689,36 @@ export default function App() {
       if (error) throw error;
       if (data) setHistory(data);
     } catch (error: any) {
-      console.error('Erro ao buscar histórico:', error);
-      setHistoryError(error.message || 'Erro de conexão com o banco de dados');
+      console.error('Erro ao buscar histórico, migrando para local:', error);
+      setUseLocalFallback(true);
+      // Local fallback
+      let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+      if (localRecords.length === 0) {
+        localRecords = generateSampleLocalRecords();
+        localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+      }
+      
+      // Aplicar filtros locally
+      let filtered = [...localRecords];
+      if (lineFilter !== 'Todas') {
+        filtered = filtered.filter(r => r.machine_name === lineFilter);
+      }
+      const year = parseInt(monthFilter.split('-')[0]);
+      const month = parseInt(monthFilter.split('-')[1]);
+      filtered = filtered.filter(r => {
+        const rDate = new Date(r.created_at);
+        const rYear = rDate.getFullYear();
+        const rMonth = rDate.getMonth() + 1;
+        const rDay = rDate.getDate();
+        const matchesMonth = rYear === year && rMonth === month;
+        if (dateFilter !== 'Todas') {
+          const day = parseInt(dateFilter);
+          return matchesMonth && rDay === day;
+        }
+        return matchesMonth;
+      });
+      filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setHistory(filtered.slice(0, 31));
     }
   };
 
@@ -342,6 +731,15 @@ export default function App() {
     if (!confirm('Tem certeza que deseja excluir este registro permanentemente?')) return;
     
     try {
+      if (useLocalFallback) {
+        const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        const filtered = localRecords.filter(item => item.id !== id);
+        localStorage.setItem('oee_local_records', JSON.stringify(filtered));
+        setHistory(prev => prev.filter(item => item.id !== id));
+        alert('Registro excluído com sucesso!');
+        return;
+      }
+
       const { error } = await supabase
         .from('oee_records')
         .delete()
@@ -351,6 +749,7 @@ export default function App() {
       
       // Atualiza o estado local removendo o item
       setHistory(prev => prev.filter(item => item.id !== id));
+      alert('Registro excluído com sucesso!');
     } catch (error: any) {
       console.error('Erro ao excluir registro:', error);
       alert('Erro ao excluir: ' + error.message);
@@ -361,8 +760,22 @@ export default function App() {
   const saveRecord = async () => {
     setIsSaving(true);
     try {
+      const now = new Date().toISOString();
+      const editorName = currentUser?.name || 'Sistema';
+
+      // Incluímos o nome do operador e a data real de salvamento no JSON de inputs
+      // Além de quem editou por último
+      const enrichedInputs = {
+        ...inputs,
+        operator_name: isEditing ? (inputs as any).operator_name : editorName,
+        saved_at: isEditing ? (inputs as any).saved_at : now,
+        last_edited_by: editorName,
+        last_edited_at: now
+      };
+
       const record = {
-        created_at: new Date(inputs.date + 'T12:00:00').toISOString(), // Usa a data selecionada pelo usuário
+        id: isEditing && editingRecordId ? editingRecordId : 'local-' + Date.now(),
+        created_at: isEditing ? (inputs as any).date_created_original || new Date(inputs.date + 'T12:00:00').toISOString() : new Date(inputs.date + 'T12:00:00').toISOString(),
         machine_name: inputs.line,
         sku: inputs.sku,
         availability: results.disponibilidade,
@@ -371,17 +784,72 @@ export default function App() {
         oee_score: results.oee,
         shift: `Turnos: ${inputs.K}`,
         notes: `Produção Real: ${inputs.H}`,
-        // Salvamos o objeto inputs completo em downtime_data para evitar erro de coluna inexistente
-        downtime_data: JSON.stringify(inputs)
+        downtime_data: JSON.stringify(enrichedInputs)
       };
 
-      const { error } = await supabase
-        .from('oee_records')
-        .insert([record]);
+      if (useLocalFallback) {
+        const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        if (isEditing && editingRecordId) {
+          const index = localRecords.findIndex(r => r.id === editingRecordId);
+          if (index > -1) {
+            localRecords[index] = { ...record, id: editingRecordId };
+          }
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+          alert('Registro atualizado com sucesso!');
+        } else {
+          localRecords.push(record);
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+          alert('Registro salvo com sucesso!');
+        }
+        
+        setIsEditing(false);
+        setEditingRecordId(null);
+        fetchHistory();
+        return;
+      }
 
-      if (error) throw error;
+      if (isEditing && editingRecordId) {
+        const { error } = await supabase
+          .from('oee_records')
+          .update({
+            created_at: record.created_at,
+            machine_name: record.machine_name,
+            sku: record.sku,
+            availability: record.availability,
+            performance: record.performance,
+            quality: record.quality,
+            oee_score: record.oee_score,
+            shift: record.shift,
+            notes: record.notes,
+            downtime_data: record.downtime_data
+          })
+          .eq('id', editingRecordId);
+        
+        if (error) throw error;
+        alert('Registro atualizado com sucesso!');
+      } else {
+        const { error } = await supabase
+          .from('oee_records')
+          .insert([{
+            created_at: record.created_at,
+            machine_name: record.machine_name,
+            sku: record.sku,
+            availability: record.availability,
+            performance: record.performance,
+            quality: record.quality,
+            oee_score: record.oee_score,
+            shift: record.shift,
+            notes: record.notes,
+            downtime_data: record.downtime_data
+          }]);
+        
+        if (error) throw error;
+        alert('Registro salvo com sucesso!');
+      }
       
-      alert('Registro salvo com sucesso no banco de dados!');
+      // Resetar estados de edição
+      setIsEditing(false);
+      setEditingRecordId(null);
       fetchHistory(); // Atualiza a lista após salvar
     } catch (error: any) {
       console.error('Erro ao salvar registro:', error);
@@ -391,24 +859,86 @@ export default function App() {
     }
   };
 
+  const handleEditRecord = (record: any) => {
+    try {
+      const sourceData = record.downtime_data;
+      if (!sourceData) return;
+
+      const parsed = typeof sourceData === 'string' 
+        ? JSON.parse(sourceData) 
+        : sourceData;
+      
+      if (parsed && typeof parsed === 'object') {
+        // Preserva a data original do registro para não sobrescrever o created_at indesejadamente
+        setInputs({
+          ...parsed,
+          date_created_original: record.created_at
+        });
+        setEditingRecordId(record.id);
+        setIsEditing(true);
+        setActiveTab('inputs');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    } catch (e) {
+      console.error("Erro ao carregar registro para edição:", e);
+      alert("Não foi possível carregar os dados detalhados deste registro para edição.");
+    }
+  };
+
+  const cancelEdit = () => {
+    setIsEditing(false);
+    setEditingRecordId(null);
+  };
+
   useEffect(() => {
     fetchHistory();
-  }, [lineFilter, monthFilter]);
+  }, [lineFilter, monthFilter, dateFilter]);
+
+  // Sincronizar Perda por Qualidade (U) com base na nova rotina de cálculo
+  useEffect(() => {
+    const totalGarrafasContador = inputs.finalCounter - inputs.initialCounter;
+    const totalGarrafasProducao = inputs.H * inputs.C;
+    
+    // Regra: Se os contadores não forem informados (valor 0), a perda é 0
+    const calculatedU = (inputs.initialCounter === 0 || inputs.finalCounter === 0)
+      ? 0
+      : Math.max(0, totalGarrafasContador - totalGarrafasProducao);
+    
+    if (inputs.U !== calculatedU) {
+      setInputs(prev => ({ ...prev, U: calculatedU }));
+    }
+  }, [inputs.initialCounter, inputs.finalCounter, inputs.H, inputs.C, inputs.U]);
 
   // Calculation logic based on the provided formulas
-  const calculateOEEResults = (data: OEEInputs): OEEResults => {
-    const { A, B, C, D, H, K, U, stops = [] } = data;
+  const calculateOEEResults = (data: OEEInputs, currentStopCodes: StopCode[]): OEEResults => {
+    const { A, B, C, D, H, K, initialCounter, finalCounter, stops = [] } = data;
+
+    // Nova rotina de cálculo para U (Perda por Qualidade)
+    // 1) Valor líquido das garrafas = Contador Final - Contador Inicial
+    const totalGarrafasContador = finalCounter - initialCounter;
+    // 2) Total de garrafas da produção = Produção Real (H) * Garrafas por Fardo (C)
+    const totalGarrafasProducao = H * C;
+    // 3) Perda por Qualidade (U) = Total Contador - Total Produção
+    // Regra: Se os contadores não forem informados (valor 0), a perda é 0
+    const U = (initialCounter === 0 || finalCounter === 0)
+      ? 0
+      : Math.max(0, totalGarrafasContador - totalGarrafasProducao);
 
     // Calcular N e Q a partir das paradas
-    const N = stops.filter(s => {
-      const config = STOP_CODES.find(c => c.code === Number(s.code));
-      return config?.category === 'P';
-    }).reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0) / 60;
+    const processedStops = stops.map(s => ({
+      ...s,
+      calculatedDuration: s.startTime && s.endTime ? calculateDurationMinutes(s.startTime, s.endTime) : (Number(s.duration) || 0)
+    }));
 
-    const Q = stops.filter(s => {
-      const config = STOP_CODES.find(c => c.code === Number(s.code));
+    const N = processedStops.filter(s => {
+      const config = currentStopCodes.find(c => c.code === Number(s.code));
+      return config?.category === 'P';
+    }).reduce((acc, curr) => acc + (curr.calculatedDuration || 0), 0) / 60;
+
+    const Q = processedStops.filter(s => {
+      const config = currentStopCodes.find(c => c.code === Number(s.code));
       return config?.category === 'NP';
-    }).reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0) / 60;
+    }).reduce((acc, curr) => acc + (curr.calculatedDuration || 0), 0) / 60;
 
     // F = D * (B/100)
     const F = D * (B / 100);
@@ -451,18 +981,29 @@ export default function App() {
     const qualidade = T > 0 ? X / T : 0;
     const oee = disponibilidade * performance * qualidade;
 
+    const maintenanceDowntime = processedStops.filter(s => 
+      [1, 2, 3, 31, 32, 33, 34, 35].includes(Number(s.code))
+    ).reduce((acc, curr) => acc + (curr.calculatedDuration || 0), 0) / 60;
+
+    const maintenanceIndex = P > 0 ? (maintenanceDowntime / P) * 100 : 0;
+    const teep = A > 0 ? (X / A) * 100 : 0;
+    const productivity = P > 0 ? (H / P) : 0;
+
     return {
       F, G, I, L, M, O, P, R, S, T, V, X, N, Q,
       disponibilidade: Math.max(0, disponibilidade * 100),
       performance: Math.max(0, performance * 100),
       qualidade: Math.max(0, qualidade * 100),
-      oee: Math.max(0, oee * 100)
+      oee: Math.max(0, oee * 100),
+      maintenanceIndex: Math.max(0, maintenanceIndex),
+      teep: Math.max(0, teep),
+      productivity: Math.max(0, productivity)
     };
   };
 
   const results = useMemo((): OEEResults => {
-    return calculateOEEResults(inputs);
-  }, [inputs]);
+    return calculateOEEResults(inputs, stopCodes);
+  }, [inputs, stopCodes]);
 
   const dashboardData = useMemo(() => {
     if (!dashboardRecord) return null;
@@ -479,7 +1020,7 @@ export default function App() {
       // Verifica se é o formato completo (objeto inputs)
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'A' in parsed) {
         const inputs = parsed as OEEInputs;
-        const results = calculateOEEResults(inputs);
+        const results = calculateOEEResults(inputs, stopCodes);
         return { inputs, results };
       }
     } catch (e) {
@@ -506,6 +1047,17 @@ export default function App() {
     if (!currentUser) return;
     setIsFetchingDashboard(true);
     try {
+      if (useLocalFallback) {
+        const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        const matched = localRecords.find(r => {
+          const rDate = new Date(r.created_at);
+          const formattedDate = `${rDate.getFullYear()}-${String(rDate.getMonth() + 1).padStart(2, '0')}-${String(rDate.getDate()).padStart(2, '0')}`;
+          return formattedDate === dashboardDate && r.machine_name === dashboardLine;
+        });
+        setDashboardRecord(matched || null);
+        return;
+      }
+
       // Definir início e fim do dia no fuso horário local e converter para ISO para o Supabase
       const startDate = new Date(`${dashboardDate}T00:00:00`).toISOString();
       const endDate = new Date(`${dashboardDate}T23:59:59`).toISOString();
@@ -522,8 +1074,15 @@ export default function App() {
       if (error) throw error;
       setDashboardRecord(data && data.length > 0 ? data[0] : null);
     } catch (err) {
-      console.error('Erro ao buscar registro do dashboard:', err);
-      setDashboardRecord(null);
+      console.error('Erro ao buscar registro do dashboard, usando local:', err);
+      // Fallback local
+      const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+      const matched = localRecords.find(r => {
+        const rDate = new Date(r.created_at);
+        const formattedDate = `${rDate.getFullYear()}-${String(rDate.getMonth() + 1).padStart(2, '0')}-${String(rDate.getDate()).padStart(2, '0')}`;
+        return formattedDate === dashboardDate && r.machine_name === dashboardLine;
+      });
+      setDashboardRecord(matched || null);
     } finally {
       setIsFetchingDashboard(false);
     }
@@ -559,6 +1118,7 @@ export default function App() {
       - Linha: ${inputs.line}
       - Produto (SKU): ${inputs.sku}
       - Data: ${inputs.date}
+      - Horário do Turno: ${inputs.shiftStartTime} às ${inputs.shiftEndTime}
       
       MÉTRICAS PRINCIPAIS:
       - OEE Global: ${results.oee.toFixed(1)}%
@@ -570,7 +1130,7 @@ export default function App() {
       - Produção Real: ${inputs.H} fardos
       - Produção Teórica: ${results.G.toFixed(1)} fardos
       - Paradas Não Programadas: ${results.Q.toFixed(1)}h
-      - Perda por Qualidade: ${inputs.U} garrafas
+      - Perda por Qualidade: ${inputs.U} garrafas (Calculada via Contador: ${inputs.initialCounter} -> ${inputs.finalCounter})
       - Redução de Velocidade (Perda de Performance): ${results.S.toFixed(1)}h
       
       GUIA DE CALIBRAÇÃO DE TOM (REFERÊNCIA):
@@ -617,17 +1177,36 @@ export default function App() {
   };
 
   const consolidatedMetrics = useMemo(() => {
-    if (history.length === 0) return { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0, paretoNP: [], paretoP: [] };
+    if (history.length === 0) {
+      return { 
+        oee: 0, 
+        disponibilidade: 0, 
+        performance: 0, 
+        qualidade: 0, 
+        maintenanceIndex: 0,
+        teep: 0,
+        productivity: 0,
+        paretoNP: [], 
+        paretoP: [] 
+      };
+    }
     
     const sum = history.reduce((acc, curr) => ({
       oee: acc.oee + curr.oee_score,
       disponibilidade: acc.disponibilidade + curr.availability,
       performance: acc.performance + curr.performance,
       qualidade: acc.qualidade + curr.quality,
-    }), { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0 });
+      teep: acc.teep + (curr.teep || 0)
+    }), { oee: 0, disponibilidade: 0, performance: 0, qualidade: 0, teep: 0 });
 
-    // Consolidar dados para o Pareto
+    // Consolidar dados para o Pareto e Índice de Quebra
     const stopsMap: { [key: number]: number } = {};
+    let totalMaintenanceMinutes = 0;
+    let totalProgrammedHours = 0;
+    let totalRealProduction = 0;
+    let computedTeepSum = 0;
+    let recordCountWithTeep = 0;
+
     history.forEach(record => {
       if (record.downtime_data) {
         try {
@@ -639,6 +1218,21 @@ export default function App() {
           // Se for o formato antigo (array), usamos diretamente
           const stops: StopEntry[] = Array.isArray(parsed) ? parsed : (parsed.stops || []);
           
+          // Tenta calcular o tempo programado e quebras se for o formato novo
+          if (!Array.isArray(parsed) && parsed.A !== undefined) {
+            const res = calculateOEEResults(parsed as OEEInputs, stopCodes);
+            totalProgrammedHours += res.P;
+            totalRealProduction += Number(parsed.H) || 0;
+            computedTeepSum += res.teep;
+            recordCountWithTeep++;
+            
+            const maintenanceMins = stops
+              .filter(s => [1, 2, 3, 31, 32, 33, 34, 35].includes(Number(s.code)))
+              .reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0);
+            
+            totalMaintenanceMinutes += maintenanceMins;
+          }
+
           stops.forEach(stop => {
             stopsMap[stop.code] = (stopsMap[stop.code] || 0) + stop.duration;
           });
@@ -648,9 +1242,13 @@ export default function App() {
       }
     });
 
+    const maintenanceIndex = totalProgrammedHours > 0 ? (totalMaintenanceMinutes / 60 / totalProgrammedHours) * 100 : 0;
+    const avgTeep = recordCountWithTeep > 0 ? computedTeepSum / recordCountWithTeep : 0;
+    const avgProductivity = totalProgrammedHours > 0 ? (totalRealProduction / totalProgrammedHours) : 0;
+
     const allPareto = Object.entries(stopsMap)
       .map(([code, duration]) => {
-        const config = STOP_CODES.find(c => c.code === parseInt(code));
+        const config = stopCodes.find(c => c.code === parseInt(code));
         return {
           name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
           duration,
@@ -667,10 +1265,13 @@ export default function App() {
       disponibilidade: sum.disponibilidade / history.length,
       performance: sum.performance / history.length,
       qualidade: sum.qualidade / history.length,
+      maintenanceIndex,
+      teep: avgTeep,
+      productivity: avgProductivity,
       paretoNP,
       paretoP
     };
-  }, [history]);
+  }, [history, stopCodes]);
 
   const currentParetoData = useMemo(() => {
     const stopsMap: { [key: number]: number } = {};
@@ -681,7 +1282,7 @@ export default function App() {
 
     const allPareto = Object.entries(stopsMap)
       .map(([code, duration]) => {
-        const config = STOP_CODES.find(c => c.code === Number(code));
+        const config = stopCodes.find(c => c.code === Number(code));
         return {
           name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
           duration,
@@ -694,7 +1295,7 @@ export default function App() {
       np: allPareto.filter(item => item.category === 'NP'),
       p: allPareto.filter(item => item.category === 'P')
     };
-  }, [inputs.stops]);
+  }, [inputs.stops, stopCodes]);
 
   const chartData = [
     { name: 'TEMPO TOTAL', value: inputs.A, color: '#7e22ce' },
@@ -725,6 +1326,41 @@ export default function App() {
     setLoginError('');
     
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        
+        // Se a lista estiver vazia, verifique e insira o admin principal padrão
+        const adminExists = localUsers.some(u => u.email === MAIN_ADMIN_EMAIL);
+        let updatedUsers = [...localUsers];
+        if (!adminExists) {
+          const defaultAdmin = {
+            name: 'Administrador Guideway',
+            email: MAIN_ADMIN_EMAIL,
+            password: 'admin',
+            is_admin: true
+          };
+          updatedUsers = [...localUsers, defaultAdmin];
+          localStorage.setItem('oee_local_users', JSON.stringify(updatedUsers));
+        }
+
+        const matched = updatedUsers.find(u => u.email === loginEmail && u.password === loginPassword);
+        if (!matched) {
+          setLoginError('E-mail ou senha incorretos.');
+          return;
+        }
+
+        const user: User = {
+          name: matched.name,
+          email: matched.email,
+          password: matched.password,
+          isAdmin: matched.is_admin
+        };
+
+        setCurrentUser(user);
+        localStorage.setItem('oee_guide_session', JSON.stringify(user));
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -747,8 +1383,38 @@ export default function App() {
       setCurrentUser(user);
       localStorage.setItem('oee_guide_session', JSON.stringify(user));
     } catch (error) {
-      console.error('Erro no login:', error);
-      setLoginError('Erro ao conectar com o servidor.');
+      console.error('Erro no login, migrando para local:', error);
+      setUseLocalFallback(true);
+      // login local
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      const matched = localUsers.find(u => u.email === loginEmail && u.password === loginPassword);
+      if (!matched) {
+        // Se for o admin inicial e os usuários locais estão vazios
+        if (loginEmail === MAIN_ADMIN_EMAIL && loginPassword === 'admin') {
+          const user: User = {
+            name: 'Administrador Guideway',
+            email: MAIN_ADMIN_EMAIL,
+            password: 'admin',
+            isAdmin: true
+          };
+          setCurrentUser(user);
+          localStorage.setItem('oee_guide_session', JSON.stringify(user));
+          localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, user]));
+          return;
+        }
+        setLoginError('E-mail ou senha incorretos.');
+        return;
+      }
+
+      const user: User = {
+        name: matched.name,
+        email: matched.email,
+        password: matched.password,
+        isAdmin: matched.is_admin
+      };
+
+      setCurrentUser(user);
+      localStorage.setItem('oee_guide_session', JSON.stringify(user));
     }
   };
 
@@ -768,6 +1434,28 @@ export default function App() {
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        if (localUsers.some(u => u.email === newUserEmail)) {
+          alert('Erro: Um usuário com este e-mail já existe.');
+          return;
+        }
+        const newUser = {
+          name: newUserName,
+          email: newUserEmail,
+          password: newUserPassword,
+          is_admin: newUserIsAdmin
+        };
+        localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, newUser]));
+        alert('Usuário criado com sucesso!');
+        setNewUserName('');
+        setNewUserEmail('');
+        setNewUserPassword('');
+        setNewUserIsAdmin(false);
+        fetchUsers();
+        return;
+      }
+
       const { error } = await supabase
         .from('users')
         .insert([{
@@ -800,6 +1488,15 @@ export default function App() {
     if (!confirm(`Deseja realmente excluir o usuário ${email}?`)) return;
 
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        const filtered = localUsers.filter(u => u.email !== email);
+        localStorage.setItem('oee_local_users', JSON.stringify(filtered));
+        alert('Usuário excluído com sucesso!');
+        fetchUsers();
+        return;
+      }
+
       const { error } = await supabase
         .from('users')
         .delete()
@@ -824,7 +1521,7 @@ export default function App() {
         return;
       }
       setInputs(prev => ({ ...prev, [key]: value }));
-    } else if (key === 'sku' || key === 'line') {
+    } else if (key === 'sku' || key === 'line' || key === 'shiftStartTime' || key === 'shiftEndTime') {
       setInputs(prev => ({ ...prev, [key]: value }));
     } else {
       const numValue = parseFloat(value) || 0;
@@ -1160,16 +1857,38 @@ export default function App() {
             >
               <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                 <div>
-                  <h2 className="text-3xl font-bold tracking-tight text-white">Gestão de Acessos</h2>
-                  <p className="text-slate-400 mt-1">Controle de usuários e permissões do sistema.</p>
+                  <h2 className="text-3xl font-bold tracking-tight text-white">Painel Administrativo</h2>
+                  <p className="text-slate-400 mt-1">Configurações globais e gestão de dados.</p>
+                </div>
+                <div className="flex bg-zinc-900 border border-white/10 p-1 rounded-2xl">
+                  <button 
+                    onClick={() => setAdminTab('users')}
+                    className={`px-6 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'users' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    Usuários
+                  </button>
+                  <button 
+                    onClick={() => setAdminTab('stops')}
+                    className={`px-6 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'stops' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    Tabela de Paradas
+                  </button>
                 </div>
               </header>
 
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <div className="lg:col-span-1">
-                  <div className="bg-zinc-900 border border-white/10 rounded-3xl p-8">
-                    <h3 className="text-lg font-bold text-white mb-6">Novo Usuário</h3>
-                    <form onSubmit={handleCreateUser} className="space-y-5">
+              <AnimatePresence mode="wait">
+                {adminTab === 'users' ? (
+                  <motion.div 
+                    key="users-tab"
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 20 }}
+                    className="grid grid-cols-1 lg:grid-cols-3 gap-8"
+                  >
+                    <div className="lg:col-span-1">
+                      <div className="bg-zinc-900 border border-white/10 rounded-3xl p-8">
+                        <h3 className="text-lg font-bold text-white mb-6">Novo Usuário</h3>
+                        <form onSubmit={handleCreateUser} className="space-y-5">
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Nome Completo</label>
                         <input 
@@ -1239,11 +1958,11 @@ export default function App() {
                   <table className="w-full text-left">
                     <thead>
                       <tr className="bg-white/5 border-b border-white/10">
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Nome</th>
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">E-mail</th>
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Perfil</th>
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Senha</th>
-                        <th className="px-8 py-5 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Nome</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">E-mail</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Perfil</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Senha</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/10">
@@ -1255,15 +1974,15 @@ export default function App() {
                         </tr>
                       ) : users.map((user) => (
                         <tr key={user.email} className="hover:bg-white/5 transition-colors">
-                          <td className="px-8 py-5 text-sm font-bold text-white">{user.name}</td>
-                          <td className="px-8 py-5 text-sm text-slate-400">{user.email}</td>
-                          <td className="px-8 py-5">
+                          <td className="px-4 py-3 text-sm font-bold text-white">{user.name}</td>
+                          <td className="px-4 py-3 text-sm text-slate-400">{user.email}</td>
+                          <td className="px-4 py-3">
                             <span className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-lg ${user.isAdmin ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-slate-400'}`}>
                               {user.isAdmin ? 'Admin' : 'Operador'}
                             </span>
                           </td>
-                          <td className="px-8 py-5 text-sm font-mono text-slate-500">{user.password}</td>
-                          <td className="px-8 py-5 text-right">
+                          <td className="px-4 py-3 text-sm font-mono text-slate-500">{user.password}</td>
+                          <td className="px-4 py-3 text-right">
                             <button 
                               onClick={() => handleDeleteUser(user.email)}
                               className="text-slate-600 hover:text-red-400 transition-colors p-2"
@@ -1284,7 +2003,150 @@ export default function App() {
                   </table>
                 </div>
               </div>
-              </div>
+            </motion.div>
+          ) : (
+                  <motion.div 
+                    key="stops-tab"
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -20 }}
+                    className="grid grid-cols-1 lg:grid-cols-3 gap-8"
+                  >
+                    <div className="lg:col-span-1">
+                      <div className="bg-zinc-900 border border-white/10 rounded-3xl p-8">
+                        <h3 className="text-lg font-bold text-white mb-6">
+                          {editingStop ? 'Editar Código' : 'Novo Código de Parada'}
+                        </h3>
+                        <div className="space-y-5">
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Código (Número)</label>
+                            <input 
+                              type="number" 
+                              value={editingStop ? editingStop.code : (newStop.code || '')}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value);
+                                if (editingStop) setEditingStop({...editingStop, code: val});
+                                else setNewStop({...newStop, code: val});
+                              }}
+                              className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                              placeholder="Ex: 501"
+                              disabled={!!editingStop}
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Descrição</label>
+                            <input 
+                              type="text" 
+                              value={editingStop ? editingStop.description : (newStop.description || '')}
+                              onChange={(e) => {
+                                if (editingStop) setEditingStop({...editingStop, description: e.target.value});
+                                else setNewStop({...newStop, description: e.target.value});
+                              }}
+                              className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                              placeholder="Descrição da parada"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Categoria</label>
+                            <select 
+                              value={editingStop ? editingStop.category : (newStop.category || 'NP')}
+                              onChange={(e) => {
+                                const val = e.target.value as 'P' | 'NP';
+                                if (editingStop) setEditingStop({...editingStop, category: val});
+                                else setNewStop({...newStop, category: val});
+                              }}
+                              className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 appearance-none bg-zinc-800"
+                            >
+                              <option value="NP">Não Programada (NP)</option>
+                              <option value="P">Programada (P)</option>
+                            </select>
+                          </div>
+                          <div className="flex gap-4">
+                            <button 
+                              onClick={() => {
+                                if (editingStop) saveStopCode(editingStop);
+                                else if (newStop.code && newStop.description) saveStopCode(newStop as StopCode);
+                              }}
+                              className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-2xl transition-all"
+                            >
+                              {editingStop ? 'SALVAR' : 'CADASTRAR'}
+                            </button>
+                            {editingStop && (
+                              <button 
+                                onClick={() => setEditingStop(null)}
+                                className="px-6 bg-zinc-800 hover:bg-zinc-700 text-white font-bold py-4 rounded-2xl transition-all"
+                              >
+                                X
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="lg:col-span-2">
+                      <div className="bg-zinc-900 border border-white/10 rounded-3xl overflow-hidden">
+                        <div className="px-8 py-5 bg-white/5 border-b border-white/10 flex justify-between items-center">
+                          <h3 className="text-sm font-bold text-white uppercase tracking-widest">Tabela de Paradas Revisada</h3>
+                          <button 
+                            onClick={fetchStopCodes}
+                            className="p-2 text-slate-400 hover:text-white transition-colors"
+                          >
+                            <RefreshCw size={16} className={isLoadingStops ? 'animate-spin' : ''} />
+                          </button>
+                        </div>
+                        <div className="max-h-[600px] overflow-y-auto">
+                          <table className="w-full text-left">
+                            <thead className="sticky top-0 bg-zinc-900 z-10">
+                              <tr className="bg-white/5 border-b border-white/10">
+                                <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest w-20">Código</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Descrição</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest w-24">Categoria</th>
+                                <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/10">
+                              {isLoadingStops ? (
+                                <tr>
+                                  <td colSpan={4} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                                    Sincronizando banco de dados...
+                                  </td>
+                                </tr>
+                              ) : stopCodes.map((stop) => (
+                                <tr key={stop.code} className="hover:bg-white/5 transition-colors group">
+                                  <td className="px-4 py-3 text-sm font-mono font-bold text-blue-400">{stop.code}</td>
+                                  <td className="px-4 py-3 text-sm text-slate-300">{stop.description}</td>
+                                  <td className="px-4 py-3">
+                                    <span className={`text-[9px] font-black uppercase px-2 py-1 rounded ${stop.category === 'P' ? 'bg-blue-500/10 text-blue-400' : 'bg-red-500/10 text-red-400'}`}>
+                                      {stop.category === 'P' ? 'Programada' : 'Não Prog.'}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-3 text-right">
+                                    <div className="flex justify-end gap-2 opacity-100 transition-opacity">
+                                      <button 
+                                        onClick={() => setEditingStop(stop)}
+                                        className="text-slate-400 hover:text-blue-400 transition-colors p-1"
+                                      >
+                                        <Settings size={16} />
+                                      </button>
+                                      <button 
+                                        onClick={() => deleteStopCode(stop.code)}
+                                        className="text-slate-600 hover:text-red-400 transition-colors p-1"
+                                      >
+                                        <Trash2 size={16} />
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
           ) : activeTab === 'dashboard' ? (
             <motion.div 
@@ -1473,8 +2335,16 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
-                        <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Análise de Perdas</h3>
+                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm relative overflow-hidden">
+                        <div className="flex justify-between items-start mb-4">
+                          <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest">Análise de Perdas</h3>
+                          <div className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter border ${
+                            dashboardRecord.oee_score >= 85 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 
+                            dashboardRecord.oee_score >= 65 ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'
+                          }`}>
+                            {dashboardRecord.oee_score >= 85 ? 'Classe Mundial' : dashboardRecord.oee_score >= 65 ? 'Aceitável' : 'Crítico'}
+                          </div>
+                        </div>
                         <div className="space-y-4">
                           <StatRow label="Redução Velocidade" value={formatNumber(dashboardData.results.S)} unit="h" color="text-orange-400" />
                           <StatRow label="Perda Qualidade" value={formatNumber(dashboardData.results.V)} unit="h" color="text-red-400" />
@@ -1482,22 +2352,70 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="bg-zinc-800 rounded-3xl p-6 text-white shadow-xl overflow-hidden relative border border-white/5">
-                        <div className="relative z-10">
-                          <h3 className="font-bold text-[10px] opacity-50 uppercase tracking-widest mb-2">Status Operacional</h3>
-                          <p className="text-2xl font-bold mb-4">
-                            {dashboardRecord.oee_score >= 85 ? 'Classe Mundial' : dashboardRecord.oee_score >= 65 ? 'Aceitável' : 'Crítico'}
-                          </p>
-                          <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
-                            <motion.div 
-                              initial={{ width: 0 }}
-                              animate={{ width: `${dashboardRecord.oee_score}%` }}
-                              transition={{ duration: 1, ease: "easeOut" }}
-                              className={`h-full ${dashboardRecord.oee_score >= 85 ? 'bg-emerald-400' : dashboardRecord.oee_score >= 65 ? 'bg-blue-400' : 'bg-red-400'}`}
-                            />
+                      <div className="bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[620px]">
+                        <div className="relative z-10 flex flex-col h-full gap-2">
+                          {/* Top Section: Índice de Quebra */}
+                          <div className="flex-1 flex flex-col">
+                            <div className="flex items-center gap-4 mb-6">
+                              <div className="w-12 h-12 bg-red-500/10 rounded-2xl flex items-center justify-center border border-red-500/20">
+                                <Cpu size={22} className="text-red-400" />
+                              </div>
+                              <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest leading-tight">
+                                Índice de Quebra<br />Médio (%)
+                              </h3>
+                            </div>
+                            
+                            <div className="mb-4">
+                              <p className="text-6xl font-black tracking-tighter text-white">
+                                {dashboardData.results.maintenanceIndex.toFixed(1)}%
+                              </p>
+                            </div>
+
+                            <div className={`flex items-center gap-2 text-sm font-bold ${dashboardData.results.maintenanceIndex < 5 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {dashboardData.results.maintenanceIndex < 5 ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                              <span>Status: {dashboardData.results.maintenanceIndex < 5 ? 'Sob Controle' : 'Atenção'}</span>
+                            </div>
+                          </div>
+
+                          {/* Divider */}
+                          <div className="h-px bg-white/5 w-full my-6" />
+                          
+                          {/* Middle Section: TEEP */}
+                          <div className="flex-1 flex flex-col">
+                            <div className="flex items-center gap-4 mb-4">
+                              <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center border border-indigo-500/20">
+                                <Gauge size={22} className="text-indigo-400" />
+                              </div>
+                              <div className="flex flex-col">
+                                <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">TEEP Médio</h3>
+                                <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Total Effective Equipment Performance</span>
+                              </div>
+                            </div>
+                            <p className="text-6xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-indigo-600">
+                              {dashboardData.results.teep.toFixed(1)}%
+                            </p>
+                          </div>
+
+                          {/* Divider */}
+                          <div className="h-px bg-white/5 w-full my-6" />
+
+                          {/* Bottom Section: Produtividade */}
+                          <div className="flex-1 flex flex-col">
+                            <div className="flex items-center gap-4 mb-4">
+                              <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
+                                <TrendingUp size={22} className="text-emerald-400" />
+                              </div>
+                              <div className="flex flex-col">
+                                <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">Produtividade de Linha</h3>
+                                <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Produção Real / Tempo Programado</span>
+                              </div>
+                            </div>
+                            <p className="text-5xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-emerald-400 to-teal-500">
+                              {dashboardData.results.productivity.toFixed(1)} <span className="text-xs font-bold tracking-normal text-emerald-400/85">fardos/h</span>
+                            </p>
                           </div>
                         </div>
-                        <Activity className="absolute -right-4 -bottom-4 opacity-[0.03]" size={120} />
+                        <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.03] group-hover:scale-110 transition-all duration-700 blur-sm" size={240} />
                       </div>
                     </div>
                   )}
@@ -1584,9 +2502,29 @@ export default function App() {
                     <input 
                       type="month"
                       value={monthFilter}
-                      onChange={(e) => setMonthFilter(e.target.value)}
+                      onChange={(e) => {
+                        setMonthFilter(e.target.value);
+                        setDateFilter('Todas'); // Resetar data ao mudar o mês
+                      }}
                       className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer"
                     />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Data</span>
+                    <select 
+                      value={dateFilter}
+                      onChange={(e) => setDateFilter(e.target.value)}
+                      className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer min-w-[100px]"
+                    >
+                      <option value="Todas">Todas</option>
+                      {Array.from({ 
+                        length: new Date(parseInt(monthFilter.split('-')[0]), parseInt(monthFilter.split('-')[1]), 0).getDate() 
+                      }, (_, i) => i + 1).map(day => (
+                        <option key={day} value={day.toString()}>
+                          Dia {day.toString().padStart(2, '0')}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                   <div className="flex flex-col gap-1">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Linha</span>
@@ -1611,235 +2549,370 @@ export default function App() {
                 </div>
               </header>
 
-              {/* Gráfico de Evolução */}
-              <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
-                <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
-                  <BarChart3 size={20} className="text-indigo-400" />
-                  Tendência de OEE Global (%)
-                </h3>
-                <div className="h-[300px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={[...history].reverse()}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                      <XAxis 
-                        dataKey="created_at" 
-                        tickFormatter={(str) => new Date(str).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
-                        tick={{ fontSize: 10, fill: '#94a3b8' }}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <YAxis 
-                        domain={[0, 100]}
-                        tick={{ fontSize: 10, fill: '#94a3b8' }}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <Tooltip 
-                        contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                        labelFormatter={(label) => new Date(label).toLocaleString('pt-BR')}
-                        formatter={(value: number) => [value.toFixed(1) + '%', 'OEE']}
-                      />
-                      <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
-                        {history.map((entry, index) => (
-                          <Cell 
-                            key={`cell-${index}`} 
-                            fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
-                          />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
+              {history.length > 0 ? (
+                <>
+                  {/* Gráfico de Evolução e Índice de Quebra Consolidado */}
+                  <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+                    <div className="lg:col-span-3 bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
+                      <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
+                        <BarChart3 size={20} className="text-indigo-400" />
+                        Tendência de OEE Global (%)
+                      </h3>
+                      <div className="h-[400px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={[...history].reverse()}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                            <XAxis 
+                              dataKey="created_at" 
+                              tickFormatter={(str) => new Date(str).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <YAxis 
+                              domain={[0, 100]}
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <Tooltip 
+                              content={<CustomOEEEvolutionTooltip />}
+                            />
+                            <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
+                              {[...history].reverse().map((entry, index) => (
+                                <Cell 
+                                  key={`cell-${index}`} 
+                                  fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
+                                />
+                              ))}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
 
-              {/* Gráfico de Pareto de Paradas */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
-                  <h3 className="font-bold text-lg flex items-center gap-2 text-red-400 mb-8">
-                    <AlertTriangle size={20} />
-                    Pareto Não Programadas (Minutos Acumulados)
-                  </h3>
-                  <div className="h-[400px] w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart 
-                        data={consolidatedMetrics.paretoNP}
-                        margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                        <XAxis 
-                          dataKey="name" 
-                          tick={{ fontSize: 10, fill: '#94a3b8' }}
-                          interval={0}
-                          angle={-45}
-                          textAnchor="end"
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <YAxis 
-                          tick={{ fontSize: 10, fill: '#94a3b8' }}
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                          formatter={(value: number) => [value + ' min', 'Duração']}
-                        />
-                        <Bar dataKey="duration" fill="#ef4444" radius={[4, 4, 0, 0]}>
-                          <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
-                  <h3 className="font-bold text-lg flex items-center gap-2 text-blue-400 mb-8">
-                    <Clock size={20} />
-                    Pareto Programadas (Minutos Acumulados)
-                  </h3>
-                  <div className="h-[400px] w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart 
-                        data={consolidatedMetrics.paretoP}
-                        margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                        <XAxis 
-                          dataKey="name" 
-                          tick={{ fontSize: 10, fill: '#94a3b8' }}
-                          interval={0}
-                          angle={-45}
-                          textAnchor="end"
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <YAxis 
-                          tick={{ fontSize: 10, fill: '#94a3b8' }}
-                          axisLine={false}
-                          tickLine={false}
-                        />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                          formatter={(value: number) => [value + ' min', 'Duração']}
-                        />
-                        <Bar dataKey="duration" fill="#3b82f6" radius={[4, 4, 0, 0]}>
-                          <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              </div>
-
-              {/* KPI Cards Consolidados */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                <KPICard 
-                  title="Disponibilidade Média" 
-                  value={consolidatedMetrics.disponibilidade} 
-                  icon={<Clock className="text-blue-400" />} 
-                  color="blue"
-                  description="Média do período filtrado"
-                />
-                <KPICard 
-                  title="Performance Média" 
-                  value={consolidatedMetrics.performance} 
-                  icon={<TrendingUp className="text-orange-400" />} 
-                  color="orange"
-                  description="Média do período filtrado"
-                />
-                <KPICard 
-                  title="Qualidade Média" 
-                  value={consolidatedMetrics.qualidade} 
-                  icon={<CheckCircle2 className="text-emerald-400" />} 
-                  color="emerald"
-                  description="Média do período filtrado"
-                />
-                <KPICard 
-                  title="OEE Global Médio" 
-                  value={consolidatedMetrics.oee} 
-                  icon={<Gauge className="text-indigo-400" />} 
-                  color="indigo"
-                  isMain
-                  description="Média do período filtrado"
-                />
-              </div>
-
-              {/* Histórico Recente Section */}
-              <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
-                <div className="px-8 py-5 bg-white/5 border-b border-white/10">
-                  <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
-                    <Clock size={16} className="text-blue-400" />
-                    Registros Detalhados
-                  </h3>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left">
-                    <thead>
-                      <tr className="bg-white/5 border-b border-white/10">
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
-                        <th className="px-8 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/10">
-                      {historyError ? (
-                        <tr>
-                          <td colSpan={8} className="px-8 py-10 text-center">
-                            <div className="flex flex-col items-center gap-2 text-red-400">
-                              <AlertTriangle size={24} />
-                              <p className="text-sm font-bold">Erro ao carregar histórico</p>
-                              <p className="text-[10px] opacity-70">{historyError}</p>
+                    <div className="lg:col-span-1 bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[620px]">
+                      <div className="relative z-10 flex flex-col h-full gap-2">
+                        {/* Top Section: Índice de Quebra */}
+                        <div className="flex-1 flex flex-col">
+                          <div className="flex items-center gap-4 mb-6">
+                            <div className="w-12 h-12 bg-red-500/10 rounded-2xl flex items-center justify-center border border-red-500/20">
+                              <Cpu size={22} className="text-red-400" />
                             </div>
-                          </td>
-                        </tr>
-                      ) : history.length > 0 ? (
-                        history.map((record) => (
-                          <tr key={record.id} className="hover:bg-white/5 transition-colors group">
-                            <td className="px-8 py-4 text-xs text-slate-400">
-                              {new Date(record.created_at).toLocaleString('pt-BR')}
-                            </td>
-                            <td className="px-8 py-4 text-xs font-bold text-white">{record.machine_name}</td>
-                            <td className="px-8 py-4 text-xs text-slate-400">{record.sku}</td>
-                            <td className="px-8 py-4 text-center text-xs text-slate-300">{record.availability.toFixed(1)}%</td>
-                            <td className="px-8 py-4 text-center text-xs text-slate-300">{record.performance.toFixed(1)}%</td>
-                            <td className="px-8 py-4 text-center text-xs text-slate-300">{record.quality.toFixed(1)}%</td>
-                            <td className="px-8 py-4 text-center">
-                              <span className={`text-xs font-bold px-2 py-1 rounded ${
-                                record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
-                                record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
-                              }`}>
-                                {record.oee_score.toFixed(1)}%
-                              </span>
-                            </td>
-                            <td className="px-8 py-4 text-right">
-                              {currentUser.isAdmin && (
-                                <button 
-                                  onClick={() => deleteRecord(record.id)}
-                                  className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                                  title="Excluir Registro"
-                                >
-                                  <Trash2 size={16} />
-                                </button>
-                              )}
-                            </td>
+                            <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest leading-tight">
+                              Índice de Quebra<br />Médio (%)
+                            </h3>
+                          </div>
+                          
+                          <div className="mb-4">
+                            <p className="text-6xl font-black tracking-tighter text-white">
+                              {consolidatedMetrics.maintenanceIndex.toFixed(1)}%
+                            </p>
+                          </div>
+
+                          <div className={`flex items-center gap-2 text-sm font-bold ${consolidatedMetrics.maintenanceIndex < 5 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {consolidatedMetrics.maintenanceIndex < 5 ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                            <span>Status: {consolidatedMetrics.maintenanceIndex < 5 ? 'Sob Controle' : 'Atenção'}</span>
+                          </div>
+                        </div>
+
+                        {/* Divider */}
+                        <div className="h-px bg-white/5 w-full my-6" />
+                        
+                        {/* Middle Section: TEEP */}
+                        <div className="flex-1 flex flex-col">
+                          <div className="flex items-center gap-4 mb-4">
+                            <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center border border-indigo-500/20">
+                              <Gauge size={22} className="text-indigo-400" />
+                            </div>
+                            <div className="flex flex-col">
+                              <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">TEEP Médio</h3>
+                              <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Total Effective Equipment Performance</span>
+                            </div>
+                          </div>
+                          <p className="text-6xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-indigo-600">
+                            {consolidatedMetrics.teep.toFixed(1)}%
+                          </p>
+                        </div>
+
+                        {/* Divider */}
+                        <div className="h-px bg-white/5 w-full my-6" />
+
+                        {/* Bottom Section: Produtividade */}
+                        <div className="flex-1 flex flex-col">
+                          <div className="flex items-center gap-4 mb-4">
+                            <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
+                              <TrendingUp size={22} className="text-emerald-400" />
+                            </div>
+                            <div className="flex flex-col">
+                              <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">Produtividade de Linhas</h3>
+                              <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Produção Real / Tempo Programado</span>
+                            </div>
+                          </div>
+                          <p className="text-5xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-emerald-400 to-teal-500">
+                            {consolidatedMetrics.productivity.toFixed(1)} <span className="text-xs font-bold tracking-normal text-emerald-400/85">fardos/h</span>
+                          </p>
+                        </div>
+                      </div>
+                      <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.03] group-hover:scale-110 transition-all duration-700 blur-sm" size={240} />
+                    </div>
+                  </div>
+
+                  {/* Gráfico de Pareto de Paradas */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                      <h3 className="font-bold text-lg flex items-center gap-2 text-red-400 mb-8">
+                        <AlertTriangle size={20} />
+                        Pareto Não Programadas (Minutos Acumulados)
+                      </h3>
+                      <div className="h-[400px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart 
+                            data={consolidatedMetrics.paretoNP}
+                            margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                            <XAxis 
+                              dataKey="name" 
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              interval={0}
+                              angle={-45}
+                              textAnchor="end"
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <YAxis 
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <Tooltip 
+                              contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                              itemStyle={{ color: '#fff' }}
+                              formatter={(value: number) => [value + ' min', 'Duração']}
+                            />
+                            <Bar dataKey="duration" fill="#ef4444" radius={[4, 4, 0, 0]}>
+                              <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                      <h3 className="font-bold text-lg flex items-center gap-2 text-blue-400 mb-8">
+                        <Clock size={20} />
+                        Pareto Programadas (Minutos Acumulados)
+                      </h3>
+                      <div className="h-[400px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart 
+                            data={consolidatedMetrics.paretoP}
+                            margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                          >
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                            <XAxis 
+                              dataKey="name" 
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              interval={0}
+                              angle={-45}
+                              textAnchor="end"
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <YAxis 
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <Tooltip 
+                              contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                              itemStyle={{ color: '#fff' }}
+                              formatter={(value: number) => [value + ' min', 'Duração']}
+                            />
+                            <Bar dataKey="duration" fill="#3b82f6" radius={[4, 4, 0, 0]}>
+                              <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* KPI Cards Consolidados */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <KPICard 
+                      title="Disponibilidade Média" 
+                      value={consolidatedMetrics.disponibilidade} 
+                      icon={<Clock className="text-blue-400" />} 
+                      color="blue"
+                      description="Média do período filtrado"
+                    />
+                    <KPICard 
+                      title="Performance Média" 
+                      value={consolidatedMetrics.performance} 
+                      icon={<TrendingUp className="text-orange-400" />} 
+                      color="orange"
+                      description="Média do período filtrado"
+                    />
+                    <KPICard 
+                      title="Qualidade Média" 
+                      value={consolidatedMetrics.qualidade} 
+                      icon={<CheckCircle2 className="text-emerald-400" />} 
+                      color="emerald"
+                      description="Média do período filtrado"
+                    />
+                    <KPICard 
+                      title="OEE Global Médio" 
+                      value={consolidatedMetrics.oee} 
+                      icon={<Gauge className="text-indigo-400" />} 
+                      color="indigo"
+                      isMain
+                      description="Média do período filtrado"
+                    />
+                  </div>
+
+                  {/* Histórico Recente Section */}
+                  <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
+                    <div className="px-8 py-5 bg-white/5 border-b border-white/10">
+                      <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
+                        <Clock size={16} className="text-blue-400" />
+                        Registros Detalhados
+                      </h3>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead>
+                          <tr className="bg-white/5 border-b border-white/10">
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Início</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Término</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perda U</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
+                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
                           </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan={8} className="px-8 py-10 text-center text-slate-500 text-sm italic">
-                            Nenhum registro encontrado para esta linha.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
+                        </thead>
+                        <tbody className="divide-y divide-white/10">
+                          {historyError ? (
+                            <tr>
+                              <td colSpan={8} className="px-8 py-10 text-center">
+                                <div className="flex flex-col items-center gap-2 text-red-400">
+                                  <AlertTriangle size={24} />
+                                  <p className="text-sm font-bold">Erro ao carregar histórico</p>
+                                  <p className="text-[10px] opacity-70">{historyError}</p>
+                                </div>
+                              </td>
+                            </tr>
+                          ) : history.length > 0 ? (
+                            history.map((record) => (
+                              <tr key={record.id} className="hover:bg-white/5 transition-colors group">
+                                <td className="px-3 py-3 text-[11px] text-slate-400 whitespace-nowrap">
+                                  {new Date(record.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                </td>
+                                <td className="px-3 py-3 text-[11px] font-bold text-white whitespace-nowrap">{record.machine_name}</td>
+                                <td className="px-3 py-3 text-[11px] text-slate-400 max-w-[120px] truncate" title={record.sku}>{record.sku}</td>
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-400">
+                                  {(() => {
+                                    try {
+                                      const d = JSON.parse(record.downtime_data);
+                                      return d.shiftStartTime || '-';
+                                    } catch(e) { return '-'; }
+                                  })()}
+                                </td>
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-400">
+                                  {(() => {
+                                    try {
+                                      const d = JSON.parse(record.downtime_data);
+                                      return d.shiftEndTime || '-';
+                                    } catch(e) { return '-'; }
+                                  })()}
+                                </td>
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-400">
+                                  {(() => {
+                                    try {
+                                      const d = JSON.parse(record.downtime_data);
+                                      return d.U?.toLocaleString() || '0';
+                                    } catch(e) { return '0'; }
+                                  })()}
+                                </td>
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.availability.toFixed(1)}%</td>
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.performance.toFixed(1)}%</td>
+                                <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.quality.toFixed(1)}%</td>
+                                <td className="px-3 py-3 text-center">
+                                  <span className={`text-[11px] font-bold px-2 py-1 rounded ${
+                                    record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
+                                    record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
+                                  }`}>
+                                    {record.oee_score.toFixed(1)}%
+                                  </span>
+                                </td>
+                                <td className="px-3 py-3 text-right">
+                                  <div className="flex items-center justify-end gap-1">
+                                    <button 
+                                      onClick={() => handleEditRecord(record)}
+                                      className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-400/10 rounded-lg transition-all"
+                                      title="Corrigir Apontamento"
+                                    >
+                                      <Pencil size={14} />
+                                    </button>
+                                    <button 
+                                      onClick={() => setSelectedRecord(record)}
+                                      className="p-1.5 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
+                                      title="Visualizar Detalhes"
+                                    >
+                                      <Search size={14} />
+                                    </button>
+                                    {currentUser.isAdmin && (
+                                      <button 
+                                        onClick={() => deleteRecord(record.id)}
+                                        className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+                                        title="Excluir Registro"
+                                      >
+                                        <Trash2 size={14} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={11} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                                Nenhum registro encontrado para esta linha.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-20 bg-zinc-900/30 rounded-3xl border border-dashed border-white/10">
+                  <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-6">
+                    <Search size={32} className="text-slate-500" />
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">Nenhum dado encontrado</h3>
+                  <p className="text-slate-400 max-w-md text-center">
+                    Não encontramos registros de produção para os filtros selecionados.
+                  </p>
+                  <p className="text-slate-500 text-sm mt-1 text-center">
+                    Por favor, tente selecionar outra data, mês ou linha de produção.
+                  </p>
+                  <button 
+                    onClick={() => setActiveTab('inputs')}
+                    className="mt-8 text-blue-400 hover:text-blue-300 font-bold flex items-center gap-2 transition-colors"
+                  >
+                    Ir para Parâmetros/Inputs
+                    <ArrowRight size={16} />
+                  </button>
                 </div>
-              </div>
+              )}
             </motion.div>
           ) : activeTab === 'inputs' ? (
             <motion.div 
@@ -1849,12 +2922,41 @@ export default function App() {
               exit={{ opacity: 0, x: -20 }}
               className="max-w-4xl mx-auto"
             >
-              <header className="mb-8">
-                <h2 className="text-3xl font-bold tracking-tight text-white">Parâmetros de Entrada</h2>
-                <p className="text-slate-400 mt-1">Configure os dados base para o cálculo do OEE.</p>
+              <header className="mb-8 flex flex-col md:flex-row justify-between items-start gap-4">
+                <div>
+                  <h2 className="text-3xl font-bold tracking-tight text-white">
+                    {isEditing ? 'Correção de Apontamento' : 'Parâmetros de Entrada'}
+                  </h2>
+                  <p className="text-slate-400 mt-1">
+                    {isEditing ? 'Ajuste os dados do registro selecionado.' : 'Configure os dados base para o cálculo do OEE.'}
+                  </p>
+                </div>
+                {isEditing && (
+                  <button 
+                    onClick={cancelEdit}
+                    className="flex items-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all border border-white/10"
+                  >
+                    Cancelar Edição
+                  </button>
+                )}
               </header>
 
               <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
+                {isEditing && (
+                  <div className="bg-amber-600/10 border-b border-amber-600/20 px-8 py-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-amber-600 rounded-lg">
+                        <Pencil size={18} className="text-white" />
+                      </div>
+                      <div>
+                        <p className="text-amber-200 font-bold text-xs">Editando Registro Existente</p>
+                        <p className="text-amber-500/70 text-[10px] uppercase font-black tracking-widest mt-0.5">
+                          ID: {editingRecordId}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div className="p-8 border-b border-white/5">
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div>
@@ -1923,6 +3025,36 @@ export default function App() {
                   </InputGroup>
 
                   <InputGroup title="Resultados de Turno">
+                    <div className="grid grid-cols-2 gap-4 col-span-2">
+                      <InputField 
+                        label="Hora Início Turno" 
+                        value={inputs.shiftStartTime} 
+                        onChange={(v) => handleInputChange('shiftStartTime', v)} 
+                        icon={<Clock size={16} />}
+                        type="time"
+                      />
+                      <InputField 
+                        label="Hora Término Turno" 
+                        value={inputs.shiftEndTime} 
+                        onChange={(v) => handleInputChange('shiftEndTime', v)} 
+                        icon={<Clock size={16} />}
+                        type="time"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4 col-span-2">
+                      <InputField 
+                        label="Contador Inicial" 
+                        value={inputs.initialCounter} 
+                        onChange={(v) => handleInputChange('initialCounter', v)} 
+                        icon={<Hash size={16} />}
+                      />
+                      <InputField 
+                        label="Contador Final" 
+                        value={inputs.finalCounter} 
+                        onChange={(v) => handleInputChange('finalCounter', v)} 
+                        icon={<Hash size={16} />}
+                      />
+                    </div>
                     <InputField 
                       label="H - Produção Real (fardos)" 
                       value={inputs.H} 
@@ -1935,12 +3067,25 @@ export default function App() {
                       onChange={(v) => handleInputChange('K', v)} 
                       icon={<Clock size={16} />}
                     />
-                    <InputField 
-                      label="U - Perda por Qualidade (garrafas)" 
-                      value={inputs.U} 
-                      onChange={(v) => handleInputChange('U', v)} 
-                      icon={<AlertTriangle size={16} />}
-                    />
+                    <div className="col-span-2 bg-blue-500/5 border border-blue-500/20 rounded-2xl p-4 mt-2">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">U - Perda por Qualidade (Calculada)</span>
+                        <AlertTriangle size={14} className="text-blue-400" />
+                      </div>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-2xl font-black text-white">
+                          {(inputs.initialCounter === 0 || inputs.finalCounter === 0) 
+                            ? 0 
+                            : Math.max(0, (inputs.finalCounter - inputs.initialCounter) - (inputs.H * inputs.C)).toLocaleString()}
+                        </span>
+                        <span className="text-xs font-bold text-slate-500 uppercase">Garrafas</span>
+                      </div>
+                      <p className="text-[9px] text-slate-500 mt-1 italic">
+                        {inputs.initialCounter === 0 || inputs.finalCounter === 0 
+                          ? "Informe os contadores para calcular a perda." 
+                          : "Cálculo: (Cont. Final - Cont. Inicial) - (Prod. Real * Fator Conv.)"}
+                      </p>
+                    </div>
                   </InputGroup>
 
                   <InputGroup title="Registro de Paradas (Conforme Formulário)" fullWidth>
@@ -1960,58 +3105,124 @@ export default function App() {
 
                       <div className="space-y-3">
                         {inputs.stops.map((stop, index) => {
-                          const stopConfig = STOP_CODES.find(c => c.code === stop.code);
+                          const stopConfig = stopCodes.find(c => c.code === stop.code);
                           return (
                             <motion.div 
                               initial={{ opacity: 0, x: -10 }}
                               animate={{ opacity: 1, x: 0 }}
                               key={stop.id} 
-                              className="flex items-center gap-4 bg-black/40 p-4 rounded-2xl border border-white/5 group hover:border-white/10 transition-all"
+                              className="flex items-start gap-4 bg-black/40 p-5 rounded-2xl border border-white/5 group hover:border-white/10 transition-all flex-col md:flex-row md:items-center"
                             >
-                              <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
-                                {index + 1}
-                              </div>
-                              <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div>
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
-                                  <select 
-                                    value={stop.code}
-                                    onChange={(e) => {
-                                      const newStops = [...inputs.stops];
-                                      newStops[index].code = parseInt(e.target.value);
-                                      setInputs(prev => ({ ...prev, stops: newStops }));
-                                    }}
-                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
-                                  >
-                                    {STOP_CODES.map(c => (
-                                      <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
-                                    ))}
-                                  </select>
+                              <div className="flex items-center gap-4 w-full md:w-auto shrink-0">
+                                <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
+                                  {index + 1}
                                 </div>
-                                <div>
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Duração (Minutos)</label>
-                                  <div className="relative">
-                                    <input 
-                                      type="number"
-                                      value={stop.duration}
+                              </div>
+                              <div className="flex-1 flex flex-col gap-4 w-full">
+                                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                  <div className="md:col-span-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
+                                    <select 
+                                      value={stop.code}
                                       onChange={(e) => {
                                         const newStops = [...inputs.stops];
-                                        newStops[index].duration = parseFloat(e.target.value) || 0;
+                                        newStops[index].code = parseInt(e.target.value);
+                                        if (newStops[index].code !== 500) {
+                                          newStops[index].reasonCategory = undefined;
+                                          newStops[index].customReason = undefined;
+                                        }
                                         setInputs(prev => ({ ...prev, stops: newStops }));
                                       }}
-                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all pr-12"
-                                      placeholder="0"
+                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                    >
+                                      {stopCodes.map(c => (
+                                        <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Início</label>
+                                    <input 
+                                      type="time"
+                                      value={stop.startTime || ''}
+                                      onChange={(e) => {
+                                        const newStops = [...inputs.stops];
+                                        newStops[index].startTime = e.target.value;
+                                        newStops[index].duration = calculateDurationMinutes(e.target.value, newStops[index].endTime);
+                                        setInputs(prev => ({ ...prev, stops: newStops }));
+                                      }}
+                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
                                     />
-                                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-500 uppercase">min</span>
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Término</label>
+                                    <div className="relative">
+                                      <input 
+                                        type="time"
+                                        value={stop.endTime || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].endTime = e.target.value;
+                                          newStops[index].duration = calculateDurationMinutes(newStops[index].startTime, e.target.value);
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                      />
+                                      {stop.duration > 0 && (
+                                        <div className="absolute -bottom-5 right-0 text-[9px] font-bold text-blue-400 uppercase">
+                                          {stop.duration} min
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
+
+                                {stop.code === 500 && (
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3 border-t border-white/5">
+                                    <div>
+                                      <label className="text-[10px] font-bold text-amber-400 uppercase mb-1 block">Categoria do Motivo (Campo Suspenso)</label>
+                                      <select 
+                                        value={stop.reasonCategory || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].reasonCategory = e.target.value;
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-amber-500/30 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-amber-500 transition-all cursor-pointer"
+                                      >
+                                        <option value="">-- Selecione a Categoria do Motivo --</option>
+                                        <option value="Falha Operacional">Falha Operacional</option>
+                                        <option value="Ajuste Mecânico">Ajuste Mecânico</option>
+                                        <option value="Problema de Infraestrutura">Problema de Infraestrutura</option>
+                                        <option value="Aguardando Insumo/Material">Aguardando Insumo/Material</option>
+                                        <option value="Aguardando Manutenção">Aguardando Manutenção</option>
+                                        <option value="Limpeza/Organização">Limpeza/Organização</option>
+                                        <option value="Outro Motivo Específico">Outro Motivo Específico</option>
+                                      </select>
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] font-bold text-amber-400 uppercase mb-1 block">Justificativa Detalhada (Texto)</label>
+                                      <input 
+                                        type="text"
+                                        value={stop.customReason || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].customReason = e.target.value;
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-amber-500/30 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-amber-500 transition-all"
+                                        placeholder="Digite aqui o motivo detalhado..."
+                                      />
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                               <button 
                                 onClick={() => {
                                   const newStops = inputs.stops.filter((_, i) => i !== index);
                                   setInputs(prev => ({ ...prev, stops: newStops }));
                                 }}
-                                className="p-2 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg"
+                                className="p-2.5 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg shrink-0 mt-2 md:mt-0"
                               >
                                 <Trash2 size={18} />
                               </button>
@@ -2025,6 +3236,8 @@ export default function App() {
                           const newStop: StopEntry = {
                             id: crypto.randomUUID(),
                             code: 1,
+                            startTime: '',
+                            endTime: '',
                             duration: 0
                           };
                           setInputs(prev => ({ ...prev, stops: [...prev.stops, newStop] }));
@@ -2060,10 +3273,14 @@ export default function App() {
                 <button 
                   onClick={saveRecord}
                   disabled={isSaving}
-                  className="bg-emerald-600 text-white px-8 py-4 rounded-2xl font-bold shadow-lg shadow-emerald-500/20 hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  className={`${
+                    isEditing 
+                      ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-500/20' 
+                      : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'
+                  } text-white px-8 py-4 rounded-2xl font-bold shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50`}
                 >
-                  {isSaving ? <RefreshCw size={20} className="animate-spin" /> : <Box size={20} />}
-                  {isSaving ? 'Salvando...' : 'Salvar Registro no Banco'}
+                  {isSaving ? <RefreshCw size={20} className="animate-spin" /> : (isEditing ? <Pencil size={20} /> : <Box size={20} />)}
+                  {isSaving ? 'Salvando...' : (isEditing ? 'Atualizar Registro' : 'Salvar Registro no Banco')}
                 </button>
                 <button 
                   onClick={() => setActiveTab('dashboard')}
@@ -2076,9 +3293,207 @@ export default function App() {
             </motion.div>
           ) : null}
         </AnimatePresence>
+
+        <AnimatePresence>
+          {selectedRecord && (
+            <RecordDetailModal 
+              record={selectedRecord} 
+              stopCodes={stopCodes}
+              onClose={() => setSelectedRecord(null)} 
+            />
+          )}
+        </AnimatePresence>
       </main>
     </div>
     </ErrorBoundary>
+  );
+}
+
+function RecordDetailModal({ record, stopCodes, onClose }: { record: any, stopCodes: StopCode[], onClose: () => void }) {
+  const data = useMemo(() => {
+    try {
+      return JSON.parse(record.downtime_data);
+    } catch (e) {
+      return null;
+    }
+  }, [record]);
+
+  if (!data) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="bg-zinc-900 w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl border border-white/10 shadow-2xl"
+      >
+        {/* Modal Header */}
+        <div className="sticky top-0 z-10 bg-zinc-900/80 backdrop-blur-md px-8 py-6 border-b border-white/10 flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+              <Search className="text-blue-400" />
+              Detalhes do Registro
+            </h2>
+            <p className="text-xs text-slate-400 mt-1">
+              ID: {record.id} • {new Date(record.created_at).toLocaleDateString('pt-BR')}
+            </p>
+          </div>
+          <button 
+            onClick={onClose}
+            className="p-2 hover:bg-white/5 rounded-xl text-slate-400 transition-colors"
+          >
+            <LogOut size={20} />
+          </button>
+        </div>
+
+        {/* Modal Content */}
+        <div className="p-8 space-y-8">
+          {/* Info Header */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Operador Original</p>
+              <p className="text-sm font-bold text-white">{data.operator_name || 'Não registrado'}</p>
+            </div>
+            <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Data Original do Salvamento</p>
+              <p className="text-sm font-bold text-white">
+                {data.saved_at ? new Date(data.saved_at).toLocaleString('pt-BR') : 'Não registrado'}
+              </p>
+            </div>
+            <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Linha / Máquina</p>
+              <p className="text-sm font-bold text-white">{record.machine_name}</p>
+            </div>
+          </div>
+
+          {/* Audit History (Optional if edited) */}
+          {data.last_edited_by && (
+            <div className="bg-amber-500/5 p-4 rounded-2xl border border-amber-500/20 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-amber-500/20 rounded-lg border border-amber-500/30">
+                  <Pencil size={14} className="text-amber-500" />
+                </div>
+                <div>
+                  <p className="text-amber-200 font-bold text-xs">Histórico: Correção Efetuada</p>
+                  <p className="text-amber-500/70 text-[10px] uppercase font-black tracking-widest leading-tight">
+                    Alterado por: <span className="text-amber-400">{data.last_edited_by}</span>
+                  </p>
+                </div>
+              </div>
+              <div className="md:text-right border-l md:border-l-0 md:border-t-0 border-amber-500/10 pl-4 md:pl-0">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Data da Última Edição</p>
+                <p className="text-xs font-bold text-amber-200/80">
+                  {new Date(data.last_edited_at).toLocaleString('pt-BR')}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* OEE Results */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-blue-500/10 p-4 rounded-2xl border border-blue-500/20">
+              <p className="text-[10px] font-bold text-blue-400 uppercase mb-1">Disponibilidade</p>
+              <p className="text-xl font-black text-white">{record.availability.toFixed(1)}%</p>
+            </div>
+            <div className="bg-orange-500/10 p-4 rounded-2xl border border-orange-500/20">
+              <p className="text-[10px] font-bold text-orange-400 uppercase mb-1">Performance</p>
+              <p className="text-xl font-black text-white">{record.performance.toFixed(1)}%</p>
+            </div>
+            <div className="bg-emerald-500/10 p-4 rounded-2xl border border-emerald-500/20">
+              <p className="text-[10px] font-bold text-emerald-400 uppercase mb-1">Qualidade</p>
+              <p className="text-xl font-black text-white">{record.quality.toFixed(1)}%</p>
+            </div>
+            <div className="bg-indigo-600 p-4 rounded-2xl shadow-lg shadow-indigo-500/20">
+              <p className="text-[10px] font-bold text-indigo-100 uppercase mb-1">OEE Score</p>
+              <p className="text-xl font-black text-white">{record.oee_score.toFixed(1)}%</p>
+            </div>
+          </div>
+
+          {/* Detailed Inputs */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div className="space-y-4">
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest border-b border-white/5 pb-2">Dados de Produção</h4>
+              <div className="grid grid-cols-2 gap-4">
+                <StatRow label="Tempo Total (A)" value={data.A?.toString() || '0'} unit="h" />
+                <StatRow label="% Projeto (B)" value={data.B?.toString() || '0'} unit="%" />
+                <StatRow label="Fator Conv. (C)" value={data.C?.toString() || '0'} unit="G/F" />
+                <StatRow label="Vel. Nominal (D)" value={data.D?.toString() || '0'} unit="GPH" />
+                <StatRow label="Prod. Real (H)" value={data.H?.toString() || '0'} unit="Fardos" />
+                <StatRow label="Turnos (K)" value={data.K?.toString() || '0'} unit="Qtd" />
+                <StatRow label="Início Turno" value={data.shiftStartTime || '-'} unit="" />
+                <StatRow label="Término Turno" value={data.shiftEndTime || '-'} unit="" />
+                <StatRow label="Cont. Inicial" value={data.initialCounter?.toString() || '0'} unit="" />
+                <StatRow label="Cont. Final" value={data.finalCounter?.toString() || '0'} unit="" />
+                <StatRow label="Perda Qual. (U)" value={data.U?.toString() || '0'} unit="Garr." />
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest border-b border-white/5 pb-2">Informações Adicionais</h4>
+              <div className="bg-white/5 p-4 rounded-2xl border border-white/10 min-h-[100px]">
+                <p className="text-[10px] font-bold text-slate-500 uppercase mb-2">Observações / Notas</p>
+                <p className="text-sm text-slate-300 italic">{record.notes || 'Sem observações'}</p>
+                <p className="text-sm text-slate-300 mt-2">{record.shift}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Stops Table */}
+          <div className="space-y-4">
+            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest border-b border-white/5 pb-2">Detalhamento de Paradas</h4>
+            <div className="bg-white/5 rounded-2xl border border-white/10 overflow-hidden">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="bg-white/5 border-b border-white/10">
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase">Código</th>
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase">Descrição</th>
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase">Início</th>
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase">Término</th>
+                    <th className="px-6 py-3 font-bold text-slate-500 uppercase text-right">Duração (min)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {data.stops && data.stops.length > 0 ? (
+                    data.stops.map((stop: any, idx: number) => {
+                      const stopInfo = stopCodes.find(s => s.code === stop.code);
+                      return (
+                        <tr key={idx} className="hover:bg-white/5 transition-colors">
+                          <td className="px-6 py-3 font-mono text-blue-400">{stop.code}</td>
+                          <td className="px-6 py-3 text-slate-300">
+                            <div className="flex flex-col">
+                              <span>{stopInfo?.description || 'Desconhecido'}</span>
+                              <span className={`text-[9px] font-bold ${stopInfo?.category === 'P' ? 'text-blue-400' : 'text-red-400'}`}>
+                                {stopInfo?.category === 'P' ? 'Programada' : 'Não Programada'}
+                              </span>
+                              {stop.code === 500 && (stop.reasonCategory || stop.customReason) && (
+                                <div className="mt-1.5 p-2 bg-amber-500/10 rounded-xl border border-amber-500/20 text-[10px] text-amber-200">
+                                  <span className="font-bold uppercase tracking-wider block text-[8px] text-amber-400 mb-0.5">Motivo de OUTROS:</span>
+                                  {stop.reasonCategory && <span className="font-semibold">{stop.reasonCategory}</span>}
+                                  {stop.reasonCategory && stop.customReason && <span className="mx-1">•</span>}
+                                  {stop.customReason && <span className="italic">"{stop.customReason}"</span>}
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-6 py-3 text-slate-400">{stop.startTime || '-'}</td>
+                          <td className="px-6 py-3 text-slate-400">{stop.endTime || '-'}</td>
+                          <td className="px-6 py-3 text-right font-bold text-white">{stop.duration} min</td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={4} className="px-6 py-8 text-center text-slate-500 italic">Nenhuma parada registrada.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </div>
   );
 }
 
@@ -2170,3 +3585,4 @@ function InputField({ label, value, onChange, icon, type = "number" }: { label: 
     </div>
   );
 }
+
