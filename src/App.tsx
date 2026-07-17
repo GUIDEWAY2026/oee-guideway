@@ -47,10 +47,10 @@ import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { supabase } from '@/lib/supabase';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
 // Error Boundary Component
-class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
+export class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
   constructor(props: any) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -118,6 +118,8 @@ interface StopEntry {
   startTime: string; // HH:mm
   endTime: string;   // HH:mm
   duration: number;  // minutos (calculado)
+  reasonCategory?: string; // Categoria do Motivo para OUTROS
+  customReason?: string;   // Observação personalizada para OUTROS
 }
 
 // Helper to calculate duration in minutes between two HH:mm strings
@@ -236,7 +238,83 @@ interface User {
 const MAIN_ADMIN_EMAIL = 'josemarcelolustosa@gmail.com';
 // ---------------------------------------------------------------
 
+// Safe localStorage helper to prevent JSON parsing crashes
+const safeGetLocalStorage = <T,>(key: string, defaultValue: T): T => {
+  try {
+    const item = localStorage.getItem(key);
+    if (!item || item === 'undefined' || item === 'null') {
+      return defaultValue;
+    }
+    return JSON.parse(item) as T;
+  } catch (e) {
+    console.warn(`Erro ao ler/parsear a chave "${key}" do localStorage:`, e);
+    try {
+      localStorage.removeItem(key); // Remove para evitar erros subsequentes
+    } catch (_) {}
+    return defaultValue;
+  }
+};
+
+const generateSampleLocalRecords = () => {
+  const records = [];
+  const lines = ['Linha 01', 'Linha 02'];
+  const skus = ['Água Mineral 500ml', 'Água Mineral 1.5L', 'Água com Gás 500ml'];
+  
+  const today = new Date();
+  
+  for (let i = 10; i >= 0; i--) {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i, 12, 0, 0);
+    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    
+    // Variar um pouco os valores para ficar realista
+    const avail = 75 + Math.random() * 20;
+    const perf = 80 + Math.random() * 18;
+    const qual = 95 + Math.random() * 4.9;
+    
+    const calculatedOee = (avail/100) * (perf/100) * (qual/100) * 100;
+    const line = lines[Math.floor(Math.random() * lines.length)];
+    const sku = skus[Math.floor(Math.random() * skus.length)];
+    
+    const sampleInputs: OEEInputs = {
+      date: dateStr,
+      sku: sku,
+      line: line,
+      A: 24,
+      B: 80,
+      C: 12,
+      D: 22000,
+      H: Math.floor(8000 + Math.random() * 4000),
+      K: 2,
+      stops: [
+        { id: 's1', code: 101, startTime: '12:00', endTime: '13:00', duration: 60 },
+        { id: 's2', code: 2, startTime: '15:30', endTime: '16:00', duration: 30 }
+      ],
+      U: Math.floor(Math.random() * 100),
+      shiftStartTime: '06:00',
+      shiftEndTime: '22:00',
+      initialCounter: 0,
+      finalCounter: 120000
+    };
+    
+    records.push({
+      id: 'local-sample-' + i,
+      created_at: date.toISOString(),
+      machine_name: line,
+      sku: sku,
+      availability: avail,
+      performance: perf,
+      quality: qual,
+      oee_score: calculatedOee,
+      shift: 'Turnos: 2',
+      notes: `Produção Real: ${sampleInputs.H}`,
+      downtime_data: JSON.stringify(sampleInputs)
+    });
+  }
+  return records;
+};
+
 export default function App() {
+  const [useLocalFallback, setUseLocalFallback] = useState(!isSupabaseConfigured);
   // Auth State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
@@ -293,12 +371,98 @@ export default function App() {
   const [lineFilter, setLineFilter] = useState<string>('Todas');
   const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
   const [dateFilter, setDateFilter] = useState<string>('Todas');
+  const [selectedStopTrace, setSelectedStopTrace] = useState<{
+    code: number;
+    description: string;
+    category: 'P' | 'NP';
+    occurrences: Array<{
+      date: string;
+      line: string;
+      startTime?: string;
+      endTime?: string;
+      duration: number;
+      reasonCategory?: string;
+      customReason?: string;
+      recordId: string;
+    }>;
+  } | null>(null);
+
+  const handleStopClick = (data: any) => {
+    if (!data || !data.code) return;
+    
+    const code = Number(data.code);
+    const config = stopCodes.find(c => c.code === code);
+    const description = config ? config.description : data.name.replace(/^\d+\s*-\s*/, '');
+    
+    const occurrences: any[] = [];
+    
+    history.forEach(record => {
+      if (record.downtime_data) {
+        try {
+          const parsed = typeof record.downtime_data === 'string' 
+            ? JSON.parse(record.downtime_data) 
+            : record.downtime_data;
+          
+          const stops: StopEntry[] = Array.isArray(parsed) ? parsed : (parsed.stops || []);
+          
+          stops.forEach(stop => {
+            if (Number(stop.code) === code) {
+              const rDate = new Date(record.created_at);
+              const formattedDate = `${String(rDate.getDate()).padStart(2, '0')}/${String(rDate.getMonth() + 1).padStart(2, '0')}/${rDate.getFullYear()}`;
+              occurrences.push({
+                date: formattedDate,
+                line: record.machine_name,
+                startTime: stop.startTime,
+                endTime: stop.endTime,
+                duration: stop.duration,
+                reasonCategory: stop.reasonCategory,
+                customReason: stop.customReason,
+                recordId: record.id
+              });
+            }
+          });
+        } catch (e) {
+          console.error("Erro ao processar downtime_data no clique da parada:", e);
+        }
+      }
+    });
+    
+    occurrences.sort((a, b) => {
+      const partsA = a.date.split('/');
+      const partsB = b.date.split('/');
+      const dateA = new Date(parseInt(partsA[2]), parseInt(partsA[1]) - 1, parseInt(partsA[0])).getTime();
+      const dateB = new Date(parseInt(partsB[2]), parseInt(partsB[1]) - 1, parseInt(partsB[0])).getTime();
+      return dateB - dateA;
+    });
+
+    setSelectedStopTrace({
+      code,
+      description,
+      category: data.category || 'NP',
+      occurrences
+    });
+  };
 
   // Buscar o último registro geral para inicializar o Dashboard
   const fetchLatestRecord = async () => {
     if (!currentUser) return;
     setIsFetchingDashboard(true);
     try {
+      if (useLocalFallback) {
+        const localRecordsStr = localStorage.getItem('oee_local_records');
+        const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+        if (localRecords.length > 0) {
+          localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+          const latest = localRecords[0];
+          const d = new Date(latest.created_at);
+          const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+          setDashboardDate(recordDate);
+          setDashboardLine(latest.machine_name);
+          setDashboardRecord(latest);
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('oee_records')
         .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
@@ -318,7 +482,18 @@ export default function App() {
         setDashboardRecord(latest);
       }
     } catch (err) {
-      console.error('Erro ao buscar último registro para o dashboard:', err);
+      console.error('Erro ao buscar último registro para o dashboard, usando local:', err);
+      const localRecordsStr = localStorage.getItem('oee_local_records');
+      const localRecords = localRecordsStr ? JSON.parse(localRecordsStr) : [];
+      if (localRecords.length > 0) {
+        localRecords.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        const latest = localRecords[0];
+        const d = new Date(latest.created_at);
+        const recordDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        setDashboardDate(recordDate);
+        setDashboardLine(latest.machine_name);
+        setDashboardRecord(latest);
+      }
     } finally {
       setIsFetchingDashboard(false);
     }
@@ -327,6 +502,21 @@ export default function App() {
   // Buscar usuários do Supabase (Apenas para ADM)
   const ensureAdminExists = async () => {
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        const adminExists = localUsers.some(u => u.email === MAIN_ADMIN_EMAIL);
+        if (!adminExists) {
+          const newAdmin = {
+            name: 'Administrador Guideway',
+            email: MAIN_ADMIN_EMAIL,
+            password: 'admin',
+            is_admin: true
+          };
+          localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, newAdmin]));
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('email')
@@ -351,6 +541,17 @@ export default function App() {
     if (!currentUser?.isAdmin) return;
     setIsLoadingUsers(true);
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        setUsers(localUsers.map(u => ({
+          name: u.name,
+          email: u.email,
+          password: u.password,
+          isAdmin: u.is_admin
+        })));
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -364,7 +565,14 @@ export default function App() {
         isAdmin: u.is_admin
       })));
     } catch (error: any) {
-      console.error('Erro ao buscar usuários:', error);
+      console.error('Erro ao buscar usuários, usando local:', error);
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      setUsers(localUsers.map(u => ({
+        name: u.name,
+        email: u.email,
+        password: u.password,
+        isAdmin: u.is_admin
+      })));
     } finally {
       setIsLoadingUsers(false);
     }
@@ -373,6 +581,12 @@ export default function App() {
   const fetchStopCodes = async () => {
     setIsLoadingStops(true);
     try {
+      if (useLocalFallback) {
+        const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+        setStopCodes(localStops);
+        return;
+      }
+
       const { data, error } = await supabase
         .from('stop_codes')
         .select('*')
@@ -399,7 +613,9 @@ export default function App() {
         setStopCodes(DEFAULT_STOP_CODES);
       }
     } catch (error: any) {
-      console.error('Erro ao buscar códigos de parada:', error);
+      console.error('Erro ao buscar códigos de parada, usando defaults/local:', error);
+      const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+      setStopCodes(localStops);
     } finally {
       setIsLoadingStops(false);
     }
@@ -407,6 +623,20 @@ export default function App() {
 
   const saveStopCode = async (stop: StopCode) => {
     try {
+      if (useLocalFallback) {
+        const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+        const index = localStops.findIndex(s => s.code === stop.code);
+        if (index > -1) {
+          localStops[index] = stop;
+        } else {
+          localStops.push(stop);
+        }
+        localStorage.setItem('oee_local_stop_codes', JSON.stringify(localStops));
+        fetchStopCodes();
+        setEditingStop(null);
+        return;
+      }
+
       const { error } = await supabase
         .from('stop_codes')
         .upsert([stop]);
@@ -423,6 +653,14 @@ export default function App() {
   const deleteStopCode = async (code: number) => {
     if (!confirm('Tem certeza que deseja excluir este código de parada?')) return;
     try {
+      if (useLocalFallback) {
+        const localStops = safeGetLocalStorage<StopCode[]>('oee_local_stop_codes', DEFAULT_STOP_CODES);
+        const filtered = localStops.filter(s => s.code !== code);
+        localStorage.setItem('oee_local_stop_codes', JSON.stringify(filtered));
+        fetchStopCodes();
+        return;
+      }
+
       const { error } = await supabase
         .from('stop_codes')
         .delete()
@@ -449,8 +687,46 @@ export default function App() {
 
   // Carregar histórico do Supabase
   const fetchHistory = async () => {
+    if (!currentUser) return;
     setHistoryError(null);
     try {
+      if (useLocalFallback) {
+        let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        if (localRecords.length === 0) {
+          localRecords = generateSampleLocalRecords();
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+        }
+        
+        // Aplicar filtros locally
+        let filtered = [...localRecords];
+        
+        if (lineFilter !== 'Todas') {
+          filtered = filtered.filter(r => r.machine_name === lineFilter);
+        }
+        
+        // Filtro de Mês e Data
+        const year = parseInt(monthFilter.split('-')[0]);
+        const month = parseInt(monthFilter.split('-')[1]);
+        
+        filtered = filtered.filter(r => {
+          const rDate = new Date(r.created_at);
+          const rYear = rDate.getFullYear();
+          const rMonth = rDate.getMonth() + 1;
+          const rDay = rDate.getDate();
+          
+          const matchesMonth = rYear === year && rMonth === month;
+          if (dateFilter !== 'Todas') {
+            const day = parseInt(dateFilter);
+            return matchesMonth && rDay === day;
+          }
+          return matchesMonth;
+        });
+        
+        filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        setHistory(filtered.slice(0, 31));
+        return;
+      }
+
       let query = supabase
         .from('oee_records')
         .select('id, created_at, machine_name, sku, availability, performance, quality, oee_score, shift, notes, downtime_data')
@@ -482,8 +758,35 @@ export default function App() {
       if (error) throw error;
       if (data) setHistory(data);
     } catch (error: any) {
-      console.error('Erro ao buscar histórico:', error);
-      setHistoryError(error.message || 'Erro de conexão com o banco de dados');
+      console.error('Erro ao buscar histórico, usando local:', error);
+      // Local fallback
+      let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+      if (localRecords.length === 0) {
+        localRecords = generateSampleLocalRecords();
+        localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+      }
+      
+      // Aplicar filtros locally
+      let filtered = [...localRecords];
+      if (lineFilter !== 'Todas') {
+        filtered = filtered.filter(r => r.machine_name === lineFilter);
+      }
+      const year = parseInt(monthFilter.split('-')[0]);
+      const month = parseInt(monthFilter.split('-')[1]);
+      filtered = filtered.filter(r => {
+        const rDate = new Date(r.created_at);
+        const rYear = rDate.getFullYear();
+        const rMonth = rDate.getMonth() + 1;
+        const rDay = rDate.getDate();
+        const matchesMonth = rYear === year && rMonth === month;
+        if (dateFilter !== 'Todas') {
+          const day = parseInt(dateFilter);
+          return matchesMonth && rDay === day;
+        }
+        return matchesMonth;
+      });
+      filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setHistory(filtered.slice(0, 31));
     }
   };
 
@@ -496,6 +799,15 @@ export default function App() {
     if (!confirm('Tem certeza que deseja excluir este registro permanentemente?')) return;
     
     try {
+      if (useLocalFallback) {
+        const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        const filtered = localRecords.filter(item => item.id !== id);
+        localStorage.setItem('oee_local_records', JSON.stringify(filtered));
+        setHistory(prev => prev.filter(item => item.id !== id));
+        alert('Registro excluído com sucesso!');
+        return;
+      }
+
       const { error } = await supabase
         .from('oee_records')
         .delete()
@@ -505,6 +817,7 @@ export default function App() {
       
       // Atualiza o estado local removendo o item
       setHistory(prev => prev.filter(item => item.id !== id));
+      alert('Registro excluído com sucesso!');
     } catch (error: any) {
       console.error('Erro ao excluir registro:', error);
       alert('Erro ao excluir: ' + error.message);
@@ -529,6 +842,7 @@ export default function App() {
       };
 
       const record = {
+        id: isEditing && editingRecordId ? editingRecordId : 'local-' + Date.now(),
         created_at: isEditing ? (inputs as any).date_created_original || new Date(inputs.date + 'T12:00:00').toISOString() : new Date(inputs.date + 'T12:00:00').toISOString(),
         machine_name: inputs.line,
         sku: inputs.sku,
@@ -541,10 +855,42 @@ export default function App() {
         downtime_data: JSON.stringify(enrichedInputs)
       };
 
+      if (useLocalFallback) {
+        const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        if (isEditing && editingRecordId) {
+          const index = localRecords.findIndex(r => r.id === editingRecordId);
+          if (index > -1) {
+            localRecords[index] = { ...record, id: editingRecordId };
+          }
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+          alert('Registro atualizado com sucesso!');
+        } else {
+          localRecords.push(record);
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+          alert('Registro salvo com sucesso!');
+        }
+        
+        setIsEditing(false);
+        setEditingRecordId(null);
+        fetchHistory();
+        return;
+      }
+
       if (isEditing && editingRecordId) {
         const { error } = await supabase
           .from('oee_records')
-          .update(record)
+          .update({
+            created_at: record.created_at,
+            machine_name: record.machine_name,
+            sku: record.sku,
+            availability: record.availability,
+            performance: record.performance,
+            quality: record.quality,
+            oee_score: record.oee_score,
+            shift: record.shift,
+            notes: record.notes,
+            downtime_data: record.downtime_data
+          })
           .eq('id', editingRecordId);
         
         if (error) throw error;
@@ -552,7 +898,18 @@ export default function App() {
       } else {
         const { error } = await supabase
           .from('oee_records')
-          .insert([record]);
+          .insert([{
+            created_at: record.created_at,
+            machine_name: record.machine_name,
+            sku: record.sku,
+            availability: record.availability,
+            performance: record.performance,
+            quality: record.quality,
+            oee_score: record.oee_score,
+            shift: record.shift,
+            notes: record.notes,
+            downtime_data: record.downtime_data
+          }]);
         
         if (error) throw error;
         alert('Registro salvo com sucesso!');
@@ -758,6 +1115,17 @@ export default function App() {
     if (!currentUser) return;
     setIsFetchingDashboard(true);
     try {
+      if (useLocalFallback) {
+        const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        const matched = localRecords.find(r => {
+          const rDate = new Date(r.created_at);
+          const formattedDate = `${rDate.getFullYear()}-${String(rDate.getMonth() + 1).padStart(2, '0')}-${String(rDate.getDate()).padStart(2, '0')}`;
+          return formattedDate === dashboardDate && r.machine_name === dashboardLine;
+        });
+        setDashboardRecord(matched || null);
+        return;
+      }
+
       // Definir início e fim do dia no fuso horário local e converter para ISO para o Supabase
       const startDate = new Date(`${dashboardDate}T00:00:00`).toISOString();
       const endDate = new Date(`${dashboardDate}T23:59:59`).toISOString();
@@ -774,8 +1142,15 @@ export default function App() {
       if (error) throw error;
       setDashboardRecord(data && data.length > 0 ? data[0] : null);
     } catch (err) {
-      console.error('Erro ao buscar registro do dashboard:', err);
-      setDashboardRecord(null);
+      console.error('Erro ao buscar registro do dashboard, usando local:', err);
+      // Fallback local
+      const localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+      const matched = localRecords.find(r => {
+        const rDate = new Date(r.created_at);
+        const formattedDate = `${rDate.getFullYear()}-${String(rDate.getMonth() + 1).padStart(2, '0')}-${String(rDate.getDate()).padStart(2, '0')}`;
+        return formattedDate === dashboardDate && r.machine_name === dashboardLine;
+      });
+      setDashboardRecord(matched || null);
     } finally {
       setIsFetchingDashboard(false);
     }
@@ -943,6 +1318,7 @@ export default function App() {
       .map(([code, duration]) => {
         const config = stopCodes.find(c => c.code === parseInt(code));
         return {
+          code: parseInt(code),
           name: config ? `${config.code} - ${config.description}` : `Código ${code}`,
           duration,
           category: config?.category || 'NP'
@@ -1009,8 +1385,11 @@ export default function App() {
 
   // Inicializar dashboard com o último registro quando o usuário logar
   useEffect(() => {
-    if (currentUser && activeTab === 'dashboard' && !dashboardRecord) {
-      fetchLatestRecord();
+    if (currentUser) {
+      fetchStopCodes(); // Recarrega códigos de parada após autenticação bem-sucedida no Supabase
+      if (activeTab === 'dashboard' && !dashboardRecord) {
+        fetchLatestRecord();
+      }
     }
   }, [currentUser, activeTab]);
 
@@ -1019,6 +1398,41 @@ export default function App() {
     setLoginError('');
     
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        
+        // Se a lista estiver vazia, verifique e insira o admin principal padrão
+        const adminExists = localUsers.some(u => u.email === MAIN_ADMIN_EMAIL);
+        let updatedUsers = [...localUsers];
+        if (!adminExists) {
+          const defaultAdmin = {
+            name: 'Administrador Guideway',
+            email: MAIN_ADMIN_EMAIL,
+            password: 'admin',
+            is_admin: true
+          };
+          updatedUsers = [...localUsers, defaultAdmin];
+          localStorage.setItem('oee_local_users', JSON.stringify(updatedUsers));
+        }
+
+        const matched = updatedUsers.find(u => u.email === loginEmail && u.password === loginPassword);
+        if (!matched) {
+          setLoginError('E-mail ou senha incorretos.');
+          return;
+        }
+
+        const user: User = {
+          name: matched.name,
+          email: matched.email,
+          password: matched.password,
+          isAdmin: matched.is_admin
+        };
+
+        setCurrentUser(user);
+        localStorage.setItem('oee_guide_session', JSON.stringify(user));
+        return;
+      }
+
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -1042,7 +1456,7 @@ export default function App() {
       localStorage.setItem('oee_guide_session', JSON.stringify(user));
     } catch (error) {
       console.error('Erro no login:', error);
-      setLoginError('Erro ao conectar com o servidor.');
+      setLoginError('Erro de conexão com o Supabase. Verifique sua conexão de rede e se as variáveis de ambiente no Netlify estão corretas.');
     }
   };
 
@@ -1062,6 +1476,28 @@ export default function App() {
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        if (localUsers.some(u => u.email === newUserEmail)) {
+          alert('Erro: Um usuário com este e-mail já existe.');
+          return;
+        }
+        const newUser = {
+          name: newUserName,
+          email: newUserEmail,
+          password: newUserPassword,
+          is_admin: newUserIsAdmin
+        };
+        localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, newUser]));
+        alert('Usuário criado com sucesso!');
+        setNewUserName('');
+        setNewUserEmail('');
+        setNewUserPassword('');
+        setNewUserIsAdmin(false);
+        fetchUsers();
+        return;
+      }
+
       const { error } = await supabase
         .from('users')
         .insert([{
@@ -1094,6 +1530,15 @@ export default function App() {
     if (!confirm(`Deseja realmente excluir o usuário ${email}?`)) return;
 
     try {
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        const filtered = localUsers.filter(u => u.email !== email);
+        localStorage.setItem('oee_local_users', JSON.stringify(filtered));
+        alert('Usuário excluído com sucesso!');
+        fetchUsers();
+        return;
+      }
+
       const { error } = await supabase
         .from('users')
         .delete()
@@ -1320,7 +1765,18 @@ export default function App() {
               </div>
             </div>
             
-            <h2 className="text-xl font-semibold text-white mb-8 text-center">Acesso ao Sistema</h2>
+            <h2 className="text-xl font-semibold text-white mb-4 text-center">Acesso ao Sistema</h2>
+            <div className="flex justify-center mb-8">
+              {useLocalFallback ? (
+                <span className="text-[10px] font-bold text-amber-500 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20 uppercase tracking-wider">
+                  ⚠️ Modo Demonstrativo (Local)
+                </span>
+              ) : (
+                <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20 uppercase tracking-wider">
+                  ⚡ Conectado ao Supabase
+                </span>
+              )}
+            </div>
             
             <form onSubmit={handleLogin} className="space-y-5 flex flex-col">
               <div>
@@ -1382,7 +1838,18 @@ export default function App() {
           />
           <div>
             <h1 className="font-bold text-xl leading-tight text-white tracking-tight">OEE GUIDEWAY</h1>
-            <p className="text-[10px] text-indigo-400 uppercase tracking-[0.2em] font-black mt-1">Industrial Solutions</p>
+            <p className="text-[10px] text-indigo-400 uppercase tracking-[0.2em] font-black mt-1 mb-2">Industrial Solutions</p>
+            <div className="flex justify-center mt-2">
+              {useLocalFallback ? (
+                <span className="text-[9px] font-bold text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20 uppercase tracking-widest">
+                  Modo Local
+                </span>
+              ) : (
+                <span className="text-[9px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 uppercase tracking-widest">
+                  Supabase Online
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -2288,7 +2755,13 @@ export default function App() {
                               itemStyle={{ color: '#fff' }}
                               formatter={(value: number) => [value + ' min', 'Duração']}
                             />
-                            <Bar dataKey="duration" fill="#ef4444" radius={[4, 4, 0, 0]}>
+                            <Bar 
+                              dataKey="duration" 
+                              fill="#ef4444" 
+                              radius={[4, 4, 0, 0]}
+                              onClick={(data) => handleStopClick(data)}
+                              className="cursor-pointer hover:opacity-85 transition-opacity"
+                            >
                               <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
                             </Bar>
                           </BarChart>
@@ -2327,7 +2800,13 @@ export default function App() {
                               itemStyle={{ color: '#fff' }}
                               formatter={(value: number) => [value + ' min', 'Duração']}
                             />
-                            <Bar dataKey="duration" fill="#3b82f6" radius={[4, 4, 0, 0]}>
+                            <Bar 
+                              dataKey="duration" 
+                              fill="#3b82f6" 
+                              radius={[4, 4, 0, 0]}
+                              onClick={(data) => handleStopClick(data)}
+                              className="cursor-pointer hover:opacity-85 transition-opacity"
+                            >
                               <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
                             </Bar>
                           </BarChart>
@@ -2708,70 +3187,118 @@ export default function App() {
                               initial={{ opacity: 0, x: -10 }}
                               animate={{ opacity: 1, x: 0 }}
                               key={stop.id} 
-                              className="flex items-center gap-4 bg-black/40 p-4 rounded-2xl border border-white/5 group hover:border-white/10 transition-all"
+                              className="flex items-start gap-4 bg-black/40 p-5 rounded-2xl border border-white/5 group hover:border-white/10 transition-all flex-col md:flex-row md:items-center"
                             >
-                              <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
-                                {index + 1}
+                              <div className="flex items-center gap-4 w-full md:w-auto shrink-0">
+                                <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-[10px] font-black text-slate-500">
+                                  {index + 1}
+                                </div>
                               </div>
-                              <div className="flex-1 grid grid-cols-1 md:grid-cols-4 gap-4">
-                                <div className="md:col-span-2">
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
-                                  <select 
-                                    value={stop.code}
-                                    onChange={(e) => {
-                                      const newStops = [...inputs.stops];
-                                      newStops[index].code = parseInt(e.target.value);
-                                      setInputs(prev => ({ ...prev, stops: newStops }));
-                                    }}
-                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
-                                  >
-                                    {stopCodes.map(c => (
-                                      <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
-                                    ))}
-                                  </select>
-                                </div>
-                                <div>
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Início</label>
-                                  <input 
-                                    type="time"
-                                    value={stop.startTime || ''}
-                                    onChange={(e) => {
-                                      const newStops = [...inputs.stops];
-                                      newStops[index].startTime = e.target.value;
-                                      newStops[index].duration = calculateDurationMinutes(e.target.value, newStops[index].endTime);
-                                      setInputs(prev => ({ ...prev, stops: newStops }));
-                                    }}
-                                    className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Término</label>
-                                  <div className="relative">
-                                    <input 
-                                      type="time"
-                                      value={stop.endTime || ''}
+                              <div className="flex-1 flex flex-col gap-4 w-full">
+                                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                  <div className="md:col-span-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Código e Descrição</label>
+                                    <select 
+                                      value={stop.code}
                                       onChange={(e) => {
                                         const newStops = [...inputs.stops];
-                                        newStops[index].endTime = e.target.value;
-                                        newStops[index].duration = calculateDurationMinutes(newStops[index].startTime, e.target.value);
+                                        newStops[index].code = parseInt(e.target.value);
+                                        if (newStops[index].code !== 500) {
+                                          newStops[index].reasonCategory = undefined;
+                                          newStops[index].customReason = undefined;
+                                        }
+                                        setInputs(prev => ({ ...prev, stops: newStops }));
+                                      }}
+                                      className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                    >
+                                      {stopCodes.map(c => (
+                                        <option key={c.code} value={c.code}>{c.code} - {c.description} ({c.category})</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Início</label>
+                                    <input 
+                                      type="time"
+                                      value={stop.startTime || ''}
+                                      onChange={(e) => {
+                                        const newStops = [...inputs.stops];
+                                        newStops[index].startTime = e.target.value;
+                                        newStops[index].duration = calculateDurationMinutes(e.target.value, newStops[index].endTime);
                                         setInputs(prev => ({ ...prev, stops: newStops }));
                                       }}
                                       className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
                                     />
-                                    {stop.duration > 0 && (
-                                      <div className="absolute -bottom-5 right-0 text-[9px] font-bold text-blue-400 uppercase">
-                                        {stop.duration} min
-                                      </div>
-                                    )}
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase mb-1 block">Hora Término</label>
+                                    <div className="relative">
+                                      <input 
+                                        type="time"
+                                        value={stop.endTime || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].endTime = e.target.value;
+                                          newStops[index].duration = calculateDurationMinutes(newStops[index].startTime, e.target.value);
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-white/10 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
+                                      />
+                                      {stop.duration > 0 && (
+                                        <div className="absolute -bottom-5 right-0 text-[9px] font-bold text-blue-400 uppercase">
+                                          {stop.duration} min
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
+
+                                {stop.code === 500 && (
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3 border-t border-white/5">
+                                    <div>
+                                      <label className="text-[10px] font-bold text-amber-400 uppercase mb-1 block">Categoria do Motivo (Campo Suspenso)</label>
+                                      <select 
+                                        value={stop.reasonCategory || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].reasonCategory = e.target.value;
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-amber-500/30 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-amber-500 transition-all cursor-pointer"
+                                      >
+                                        <option value="">-- Selecione a Categoria do Motivo --</option>
+                                        <option value="Falha Operacional">Falha Operacional</option>
+                                        <option value="Ajuste Mecânico">Ajuste Mecânico</option>
+                                        <option value="Problema de Infraestrutura">Problema de Infraestrutura</option>
+                                        <option value="Aguardando Insumo/Material">Aguardando Insumo/Material</option>
+                                        <option value="Aguardando Manutenção">Aguardando Manutenção</option>
+                                        <option value="Limpeza/Organização">Limpeza/Organização</option>
+                                        <option value="Outro Motivo Específico">Outro Motivo Específico</option>
+                                      </select>
+                                    </div>
+                                    <div>
+                                      <label className="text-[10px] font-bold text-amber-400 uppercase mb-1 block">Justificativa Detalhada (Texto)</label>
+                                      <input 
+                                        type="text"
+                                        value={stop.customReason || ''}
+                                        onChange={(e) => {
+                                          const newStops = [...inputs.stops];
+                                          newStops[index].customReason = e.target.value;
+                                          setInputs(prev => ({ ...prev, stops: newStops }));
+                                        }}
+                                        className="w-full bg-zinc-900 border border-amber-500/30 rounded-xl px-3 py-2 text-white text-xs focus:outline-none focus:border-amber-500 transition-all"
+                                        placeholder="Digite aqui o motivo detalhado..."
+                                      />
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                               <button 
                                 onClick={() => {
                                   const newStops = inputs.stops.filter((_, i) => i !== index);
                                   setInputs(prev => ({ ...prev, stops: newStops }));
                                 }}
-                                className="p-2 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg"
+                                className="p-2.5 text-slate-600 hover:text-red-400 transition-colors bg-white/5 rounded-lg shrink-0 mt-2 md:mt-0"
                               >
                                 <Trash2 size={18} />
                               </button>
@@ -2849,6 +3376,22 @@ export default function App() {
               record={selectedRecord} 
               stopCodes={stopCodes}
               onClose={() => setSelectedRecord(null)} 
+            />
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {selectedStopTrace && (
+            <StopTraceModal 
+              trace={selectedStopTrace} 
+              stopCodes={stopCodes}
+              onClose={() => setSelectedStopTrace(null)}
+              onSelectRecord={(recId) => {
+                const rec = history.find(r => r.id === recId);
+                if (rec) {
+                  setSelectedRecord(rec);
+                }
+              }}
             />
           )}
         </AnimatePresence>
@@ -3015,6 +3558,14 @@ function RecordDetailModal({ record, stopCodes, onClose }: { record: any, stopCo
                               <span className={`text-[9px] font-bold ${stopInfo?.category === 'P' ? 'text-blue-400' : 'text-red-400'}`}>
                                 {stopInfo?.category === 'P' ? 'Programada' : 'Não Programada'}
                               </span>
+                              {stop.code === 500 && (stop.reasonCategory || stop.customReason) && (
+                                <div className="mt-1.5 p-2 bg-amber-500/10 rounded-xl border border-amber-500/20 text-[10px] text-amber-200">
+                                  <span className="font-bold uppercase tracking-wider block text-[8px] text-amber-400 mb-0.5">Motivo de OUTROS:</span>
+                                  {stop.reasonCategory && <span className="font-semibold">{stop.reasonCategory}</span>}
+                                  {stop.reasonCategory && stop.customReason && <span className="mx-1">•</span>}
+                                  {stop.customReason && <span className="italic">"{stop.customReason}"</span>}
+                                </div>
+                              )}
                             </div>
                           </td>
                           <td className="px-6 py-3 text-slate-400">{stop.startTime || '-'}</td>
@@ -3126,3 +3677,178 @@ function InputField({ label, value, onChange, icon, type = "number" }: { label: 
     </div>
   );
 }
+
+interface StopOccurrence {
+  date: string;
+  line: string;
+  startTime?: string;
+  endTime?: string;
+  duration: number;
+  reasonCategory?: string;
+  customReason?: string;
+  recordId: string;
+}
+
+interface StopTrace {
+  code: number;
+  description: string;
+  category: 'P' | 'NP';
+  occurrences: StopOccurrence[];
+}
+
+function StopTraceModal({ 
+  trace, 
+  stopCodes, 
+  onClose,
+  onSelectRecord
+}: { 
+  trace: StopTrace, 
+  stopCodes: StopCode[], 
+  onClose: () => void,
+  onSelectRecord: (recordId: string) => void
+}) {
+  const totalOccurrences = trace.occurrences.length;
+  const totalDuration = trace.occurrences.reduce((acc, curr) => acc + curr.duration, 0);
+  const averageDuration = totalOccurrences > 0 ? (totalDuration / totalOccurrences) : 0;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="bg-zinc-900 w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl border border-white/10 shadow-2xl flex flex-col"
+      >
+        {/* Modal Header */}
+        <div className="sticky top-0 z-10 bg-zinc-900/80 backdrop-blur-md px-8 py-6 border-b border-white/10 flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
+              <span className={`p-1.5 rounded-lg ${trace.category === 'P' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'}`}>
+                {trace.category === 'P' ? <Clock size={18} /> : <AlertTriangle size={18} />}
+              </span>
+              Rastreabilidade de Paradas: Código {trace.code}
+            </h2>
+            <p className="text-sm font-semibold text-slate-400 mt-1">
+              {trace.description}
+            </p>
+          </div>
+          <button 
+            onClick={onClose}
+            className="p-2 hover:bg-white/5 rounded-xl text-slate-400 hover:text-white transition-colors"
+          >
+            <LogOut size={20} />
+          </button>
+        </div>
+
+        {/* Modal Content */}
+        <div className="p-8 space-y-8 overflow-y-auto flex-1">
+          {/* Summary Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="bg-white/5 p-5 rounded-2xl border border-white/10 flex flex-col justify-between">
+              <div>
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Total de Ocorrências</p>
+                <p className="text-3xl font-black text-white">{totalOccurrences}</p>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-2">Número total de paradas deste tipo registradas no mês</p>
+            </div>
+            
+            <div className="bg-white/5 p-5 rounded-2xl border border-white/10 flex flex-col justify-between">
+              <div>
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Duração Total Acumulada</p>
+                <p className="text-3xl font-black text-white">{totalDuration} <span className="text-sm font-bold text-slate-400">min</span></p>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-2">Soma do tempo de parada de todas as ocorrências</p>
+            </div>
+
+            <div className="bg-white/5 p-5 rounded-2xl border border-white/10 flex flex-col justify-between">
+              <div>
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Duração Média</p>
+                <p className="text-3xl font-black text-white">{averageDuration.toFixed(1)} <span className="text-sm font-bold text-slate-400">min</span></p>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-2">Tempo médio gasto por parada desse código</p>
+            </div>
+          </div>
+
+          {/* Occurrences Table */}
+          <div className="space-y-4">
+            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest border-b border-white/5 pb-2 flex items-center justify-between">
+              <span>Histórico de Ocorrências Detalhado</span>
+              <span className="text-[10px] font-medium text-slate-500 lowercase">Mostrando {totalOccurrences} registros</span>
+            </h4>
+            
+            <div className="bg-white/5 rounded-2xl border border-white/10 overflow-hidden">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="bg-white/5 border-b border-white/10">
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase">Data</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase">Linha / Máquina</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase">Horário</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase text-right">Duração</th>
+                    <th className="px-6 py-4 font-bold text-slate-500 uppercase text-center">Ações</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {trace.occurrences && trace.occurrences.length > 0 ? (
+                    trace.occurrences.map((occ: StopOccurrence, idx: number) => {
+                      return (
+                        <tr key={idx} className="hover:bg-white/5 transition-colors">
+                          <td className="px-6 py-4 text-white font-semibold">
+                            <div className="flex items-center gap-2">
+                              <Calendar size={14} className="text-slate-400" />
+                              {occ.date}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-slate-300 font-medium">
+                            <div className="flex flex-col">
+                              <span>{occ.line}</span>
+                              {(occ.reasonCategory || occ.customReason) && (
+                                <div className="mt-1 p-1.5 bg-amber-500/5 border border-amber-500/10 rounded-lg text-[10px] text-amber-300 max-w-xs leading-normal">
+                                  {occ.reasonCategory && <span className="font-bold">{occ.reasonCategory}</span>}
+                                  {occ.reasonCategory && occ.customReason && <span className="mx-1">•</span>}
+                                  {occ.customReason && <span className="italic">"{occ.customReason}"</span>}
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-slate-400">
+                            {occ.startTime && occ.endTime ? (
+                              <span className="font-mono">{occ.startTime} - {occ.endTime}</span>
+                            ) : (
+                              <span className="text-slate-500">-</span>
+                            )}
+                          </td>
+                          <td className="px-6 py-4 text-right">
+                            <span className="font-bold text-white bg-white/5 px-2.5 py-1 rounded-lg border border-white/5">
+                              {occ.duration} min
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            <button
+                              onClick={() => onSelectRecord(occ.recordId)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 hover:text-blue-300 rounded-xl border border-blue-500/20 text-xs font-bold transition-all"
+                              title="Ver Registro Completo"
+                            >
+                              <Search size={12} />
+                              Ver Registro
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={5} className="px-6 py-12 text-center text-slate-500 italic">
+                        Nenhuma ocorrência encontrada para este código de parada no período selecionado.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
