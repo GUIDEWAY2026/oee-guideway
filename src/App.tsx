@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   BarChart, 
   Bar, 
@@ -25,6 +25,7 @@ import {
   TrendingUp,
   Info,
   ChevronRight,
+  ChevronDown,
   Droplets,
   Gauge,
   Sparkles,
@@ -40,7 +41,8 @@ import {
   Search,
   ArrowRight,
   Hash,
-  Pencil
+  Pencil,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
@@ -255,6 +257,8 @@ const safeGetLocalStorage = <T,>(key: string, defaultValue: T): T => {
   }
 };
 
+
+
 const generateSampleLocalRecords = () => {
   const records = [];
   const lines = ['Linha 01', 'Linha 02'];
@@ -262,52 +266,52 @@ const generateSampleLocalRecords = () => {
   
   const today = new Date();
   
-  for (let i = 10; i >= 0; i--) {
+  for (let i = 45; i >= 0; i--) {
     const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i, 12, 0, 0);
     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     
-    // Variar um pouco os valores para ficar realista
-    const avail = 75 + Math.random() * 20;
-    const perf = 80 + Math.random() * 18;
-    const qual = 95 + Math.random() * 4.9;
-    
-    const calculatedOee = (avail/100) * (perf/100) * (qual/100) * 100;
-    const line = lines[Math.floor(Math.random() * lines.length)];
-    const sku = skus[Math.floor(Math.random() * skus.length)];
-    
-    const sampleInputs: OEEInputs = {
-      date: dateStr,
-      sku: sku,
-      line: line,
-      A: 24,
-      B: 80,
-      C: 12,
-      D: 22000,
-      H: Math.floor(8000 + Math.random() * 4000),
-      K: 2,
-      stops: [
-        { id: 's1', code: 101, startTime: '12:00', endTime: '13:00', duration: 60 },
-        { id: 's2', code: 2, startTime: '15:30', endTime: '16:00', duration: 30 }
-      ],
-      U: Math.floor(Math.random() * 100),
-      shiftStartTime: '06:00',
-      shiftEndTime: '22:00',
-      initialCounter: 0,
-      finalCounter: 120000
-    };
-    
-    records.push({
-      id: 'local-sample-' + i,
-      created_at: date.toISOString(),
-      machine_name: line,
-      sku: sku,
-      availability: avail,
-      performance: perf,
-      quality: qual,
-      oee_score: calculatedOee,
-      shift: 'Turnos: 2',
-      notes: `Produção Real: ${sampleInputs.H}`,
-      downtime_data: JSON.stringify(sampleInputs)
+    lines.forEach((line, lineIdx) => {
+      const avail = 75 + Math.random() * 20;
+      const perf = 80 + Math.random() * 18;
+      const qual = 95 + Math.random() * 4.9;
+      
+      const calculatedOee = (avail/100) * (perf/100) * (qual/100) * 100;
+      const sku = skus[(i + lineIdx) % skus.length];
+      
+      const sampleInputs: OEEInputs = {
+        date: dateStr,
+        sku: sku,
+        line: line,
+        A: 24,
+        B: 80,
+        C: 12,
+        D: 22000,
+        H: Math.floor(8000 + Math.random() * 4000),
+        K: 2,
+        stops: [
+          { id: 's1', code: 101, startTime: '12:00', endTime: '13:00', duration: 60 },
+          { id: 's2', code: 2, startTime: '15:30', endTime: '16:00', duration: 30 }
+        ],
+        U: Math.floor(Math.random() * 100),
+        shiftStartTime: '06:00',
+        shiftEndTime: '22:00',
+        initialCounter: 0,
+        finalCounter: 120000
+      };
+      
+      records.push({
+        id: `local-sample-${i}-${lineIdx}`,
+        created_at: date.toISOString(),
+        machine_name: line,
+        sku: sku,
+        availability: avail,
+        performance: perf,
+        quality: qual,
+        oee_score: calculatedOee,
+        shift: 'Turnos: 2',
+        notes: `Produção Real: ${sampleInputs.H}`,
+        downtime_data: JSON.stringify(sampleInputs)
+      });
     });
   }
   return records;
@@ -370,7 +374,70 @@ export default function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [lineFilter, setLineFilter] = useState<string>('Todas');
   const [monthFilter, setMonthFilter] = useState<string>(new Date().toISOString().slice(0, 7));
-  const [dateFilter, setDateFilter] = useState<string>('Todas');
+  const [selectedDates, setSelectedDates] = useState<string[]>(['Todas']);
+  const [isDateMenuOpen, setIsDateMenuOpen] = useState<boolean>(false);
+  const dateMenuRef = useRef<HTMLDivElement>(null);
+
+  // Fechar menu de datas ao clicar fora
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dateMenuRef.current && !dateMenuRef.current.contains(event.target as Node)) {
+        setIsDateMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const isAllDatesSelected = useMemo(() => {
+    return selectedDates.length === 0 || selectedDates.includes('Todas');
+  }, [selectedDates]);
+
+  const getDateFilterLabel = () => {
+    if (isAllDatesSelected) return 'Todas as Datas';
+    if (selectedDates.length === 1) return `Dia ${selectedDates[0].padStart(2, '0')}`;
+    
+    const nums = selectedDates.map(d => parseInt(d)).filter(n => !isNaN(n)).sort((a, b) => a - b);
+    if (nums.length === 0) return 'Todas as Datas';
+    
+    let isContiguous = true;
+    for (let i = 1; i < nums.length; i++) {
+      if (nums[i] !== nums[i - 1] + 1) {
+        isContiguous = false;
+        break;
+      }
+    }
+    
+    if (isContiguous && nums.length > 1) {
+      return `Dia ${nums[0].toString().padStart(2, '0')} a ${nums[nums.length - 1].toString().padStart(2, '0')}`;
+    }
+    
+    if (nums.length <= 3) {
+      return nums.map(n => `Dia ${n.toString().padStart(2, '0')}`).join(', ');
+    }
+    
+    return `${nums.length} datas sel.`;
+  };
+
+  const toggleDateSelection = (dayStr: string) => {
+    if (dayStr === 'Todas') {
+      setSelectedDates(['Todas']);
+      return;
+    }
+
+    let updated = selectedDates.filter(d => d !== 'Todas');
+    if (updated.includes(dayStr)) {
+      updated = updated.filter(d => d !== dayStr);
+    } else {
+      updated.push(dayStr);
+    }
+
+    if (updated.length === 0) {
+      setSelectedDates(['Todas']);
+    } else {
+      setSelectedDates(updated);
+    }
+  };
   const [selectedStopTrace, setSelectedStopTrace] = useState<{
     code: number;
     description: string;
@@ -504,7 +571,7 @@ export default function App() {
     try {
       if (useLocalFallback) {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
-        const adminExists = localUsers.some(u => u.email === MAIN_ADMIN_EMAIL);
+        const adminExists = localUsers.some(u => u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase());
         if (!adminExists) {
           const newAdmin = {
             name: 'Administrador Guideway',
@@ -513,17 +580,27 @@ export default function App() {
             is_admin: true
           };
           localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, newAdmin]));
+        } else {
+          // Garante que o administrador local existente de fato tenha a flag is_admin: true
+          const updatedUsers = localUsers.map(u => {
+            if (u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()) {
+              return { ...u, is_admin: true };
+            }
+            return u;
+          });
+          localStorage.setItem('oee_local_users', JSON.stringify(updatedUsers));
         }
         return;
       }
 
+      // No Supabase, busca por correspondência insensível a maiúsculas/minúsculas
       const { data, error } = await supabase
         .from('users')
-        .select('email')
-        .eq('email', MAIN_ADMIN_EMAIL)
-        .single();
+        .select('*')
+        .ilike('email', MAIN_ADMIN_EMAIL)
+        .maybeSingle();
       
-      if (error && error.code === 'PGRST116') { // PGRST116 = Not Found
+      if (!data) {
         console.log('Criando usuário administrador inicial...');
         await supabase.from('users').insert([{
           name: 'Administrador Guideway',
@@ -531,6 +608,12 @@ export default function App() {
           password: 'admin', // Senha padrão inicial
           is_admin: true
         }]);
+      } else if (!data.is_admin) {
+        console.log('Atualizando usuário existente para administrador...');
+        await supabase
+          .from('users')
+          .update({ is_admin: true })
+          .eq('email', data.email);
       }
     } catch (err) {
       console.error('Erro ao verificar administrador:', err);
@@ -690,6 +773,9 @@ export default function App() {
     if (!currentUser) return;
     setHistoryError(null);
     try {
+      const year = parseInt(monthFilter.split('-')[0]);
+      const month = parseInt(monthFilter.split('-')[1]);
+
       if (useLocalFallback) {
         let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
         if (localRecords.length === 0) {
@@ -697,16 +783,11 @@ export default function App() {
           localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
         }
         
-        // Aplicar filtros locally
         let filtered = [...localRecords];
         
         if (lineFilter !== 'Todas') {
           filtered = filtered.filter(r => r.machine_name === lineFilter);
         }
-        
-        // Filtro de Mês e Data
-        const year = parseInt(monthFilter.split('-')[0]);
-        const month = parseInt(monthFilter.split('-')[1]);
         
         filtered = filtered.filter(r => {
           const rDate = new Date(r.created_at);
@@ -715,15 +796,18 @@ export default function App() {
           const rDay = rDate.getDate();
           
           const matchesMonth = rYear === year && rMonth === month;
-          if (dateFilter !== 'Todas') {
-            const day = parseInt(dateFilter);
-            return matchesMonth && rDay === day;
+          if (!matchesMonth) return false;
+
+          const isAll = selectedDates.length === 0 || selectedDates.includes('Todas');
+          if (!isAll) {
+            return selectedDates.includes(rDay.toString());
           }
-          return matchesMonth;
+
+          return true;
         });
         
         filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-        setHistory(filtered.slice(0, 31));
+        setHistory(filtered.slice(0, 100));
         return;
       }
 
@@ -736,27 +820,26 @@ export default function App() {
         query = query.eq('machine_name', lineFilter);
       }
 
-      // Filtro de Mês e Data
-      const year = parseInt(monthFilter.split('-')[0]);
-      const month = parseInt(monthFilter.split('-')[1]);
-      
-      let startDate, endDate;
-      if (dateFilter !== 'Todas') {
-        const day = parseInt(dateFilter);
-        // Usar data local para o filtro
-        startDate = new Date(year, month - 1, day, 0, 0, 0).toISOString();
-        endDate = new Date(year, month - 1, day, 23, 59, 59).toISOString();
-      } else {
-        startDate = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
-        endDate = new Date(year, month, 0, 23, 59, 59).toISOString();
-      }
+      const startDate = new Date(year, month - 1, 1, 0, 0, 0).toISOString();
+      const endDate = new Date(year, month, 0, 23, 59, 59).toISOString();
       
       query = query.gte('created_at', startDate).lte('created_at', endDate);
 
-      const { data, error } = await query.limit(31);
+      const { data, error } = await query.limit(100);
       
       if (error) throw error;
-      if (data) setHistory(data);
+      if (data) {
+        const isAll = selectedDates.length === 0 || selectedDates.includes('Todas');
+        if (!isAll) {
+          const filteredData = data.filter(r => {
+            const d = new Date(r.created_at);
+            return selectedDates.includes(d.getDate().toString());
+          });
+          setHistory(filteredData);
+        } else {
+          setHistory(data);
+        }
+      }
     } catch (error: any) {
       console.error('Erro ao buscar histórico, usando local:', error);
       // Local fallback
@@ -766,27 +849,30 @@ export default function App() {
         localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
       }
       
-      // Aplicar filtros locally
+      const year = parseInt(monthFilter.split('-')[0]);
+      const month = parseInt(monthFilter.split('-')[1]);
+
       let filtered = [...localRecords];
       if (lineFilter !== 'Todas') {
         filtered = filtered.filter(r => r.machine_name === lineFilter);
       }
-      const year = parseInt(monthFilter.split('-')[0]);
-      const month = parseInt(monthFilter.split('-')[1]);
       filtered = filtered.filter(r => {
         const rDate = new Date(r.created_at);
         const rYear = rDate.getFullYear();
         const rMonth = rDate.getMonth() + 1;
         const rDay = rDate.getDate();
         const matchesMonth = rYear === year && rMonth === month;
-        if (dateFilter !== 'Todas') {
-          const day = parseInt(dateFilter);
-          return matchesMonth && rDay === day;
+        if (!matchesMonth) return false;
+
+        const isAll = selectedDates.length === 0 || selectedDates.includes('Todas');
+        if (!isAll) {
+          return selectedDates.includes(rDay.toString());
         }
-        return matchesMonth;
+
+        return true;
       });
       filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-      setHistory(filtered.slice(0, 31));
+      setHistory(filtered.slice(0, 100));
     }
   };
 
@@ -960,7 +1046,7 @@ export default function App() {
 
   useEffect(() => {
     fetchHistory();
-  }, [lineFilter, monthFilter, dateFilter]);
+  }, [lineFilter, monthFilter, selectedDates]);
 
   // Sincronizar Perda por Qualidade (U) com base na nova rotina de cálculo
   useEffect(() => {
@@ -1379,7 +1465,18 @@ export default function App() {
     ensureAdminExists();
     const session = localStorage.getItem('oee_guide_session');
     if (session) {
-      setCurrentUser(JSON.parse(session));
+      try {
+        const parsed = JSON.parse(session);
+        if (parsed) {
+          // Garante que se o e-mail da sessão for o do admin principal, herda isAdmin true instantaneamente
+          if (parsed.email && parsed.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()) {
+            parsed.isAdmin = true;
+          }
+          setCurrentUser(parsed);
+        }
+      } catch (e) {
+        console.error("Erro ao ler sessão local:", e);
+      }
     }
   }, []);
 
@@ -1398,11 +1495,13 @@ export default function App() {
     setLoginError('');
     
     try {
+      const cleanEmail = loginEmail.trim();
+      
       if (useLocalFallback) {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
         
         // Se a lista estiver vazia, verifique e insira o admin principal padrão
-        const adminExists = localUsers.some(u => u.email === MAIN_ADMIN_EMAIL);
+        const adminExists = localUsers.some(u => u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase());
         let updatedUsers = [...localUsers];
         if (!adminExists) {
           const defaultAdmin = {
@@ -1415,7 +1514,10 @@ export default function App() {
           localStorage.setItem('oee_local_users', JSON.stringify(updatedUsers));
         }
 
-        const matched = updatedUsers.find(u => u.email === loginEmail && u.password === loginPassword);
+        const matched = updatedUsers.find(u => 
+          u.email.toLowerCase() === cleanEmail.toLowerCase() && 
+          u.password === loginPassword
+        );
         if (!matched) {
           setLoginError('E-mail ou senha incorretos.');
           return;
@@ -1425,7 +1527,7 @@ export default function App() {
           name: matched.name,
           email: matched.email,
           password: matched.password,
-          isAdmin: matched.is_admin
+          isAdmin: matched.is_admin || matched.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()
         };
 
         setCurrentUser(user);
@@ -1433,12 +1535,13 @@ export default function App() {
         return;
       }
 
+      // No Supabase, busca o usuário ignorando maiúsculas/minúsculas no e-mail
       const { data, error } = await supabase
         .from('users')
         .select('*')
-        .eq('email', loginEmail)
+        .ilike('email', cleanEmail)
         .eq('password', loginPassword)
-        .single();
+        .maybeSingle();
 
       if (error || !data) {
         setLoginError('E-mail ou senha incorretos.');
@@ -1449,7 +1552,7 @@ export default function App() {
         name: data.name,
         email: data.email,
         password: data.password,
-        isAdmin: data.is_admin
+        isAdmin: data.is_admin || data.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()
       };
 
       setCurrentUser(user);
@@ -2560,7 +2663,7 @@ export default function App() {
                   <h2 className="text-3xl font-bold tracking-tight text-white">Evolução Histórica</h2>
                   <p className="text-slate-400 mt-1">Acompanhamento do desempenho OEE ao longo do tempo.</p>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <div className="flex flex-col gap-1">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Mês</span>
                     <input 
@@ -2568,27 +2671,124 @@ export default function App() {
                       value={monthFilter}
                       onChange={(e) => {
                         setMonthFilter(e.target.value);
-                        setDateFilter('Todas'); // Resetar data ao mudar o mês
+                        setSelectedDates(['Todas']);
                       }}
                       className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer"
                     />
                   </div>
-                  <div className="flex flex-col gap-1">
+                  <div className="flex flex-col gap-1 relative" ref={dateMenuRef}>
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Data</span>
-                    <select 
-                      value={dateFilter}
-                      onChange={(e) => setDateFilter(e.target.value)}
-                      className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer min-w-[100px]"
+                    <button
+                      type="button"
+                      onClick={() => setIsDateMenuOpen(!isDateMenuOpen)}
+                      className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer flex items-center justify-between gap-2 min-w-[150px]"
                     >
-                      <option value="Todas">Todas</option>
-                      {Array.from({ 
-                        length: new Date(parseInt(monthFilter.split('-')[0]), parseInt(monthFilter.split('-')[1]), 0).getDate() 
-                      }, (_, i) => i + 1).map(day => (
-                        <option key={day} value={day.toString()}>
-                          Dia {day.toString().padStart(2, '0')}
-                        </option>
-                      ))}
-                    </select>
+                      <div className="flex items-center gap-1.5 truncate">
+                        <Calendar size={14} className="text-blue-400 shrink-0" />
+                        <span className="truncate">{getDateFilterLabel()}</span>
+                      </div>
+                      <ChevronDown size={14} className={`text-slate-400 shrink-0 transition-transform ${isDateMenuOpen ? 'rotate-180' : ''}`} />
+                    </button>
+
+                    {isDateMenuOpen && (
+                      <div className="absolute top-full left-0 sm:left-auto sm:right-0 mt-2 z-50 w-72 bg-zinc-900 border border-white/20 rounded-2xl p-4 shadow-2xl backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
+                        <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-white/10">
+                          <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <Calendar size={14} className="text-blue-400" />
+                            Selecionar Período / Datas
+                          </span>
+                          {!isAllDatesSelected && (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedDates(['Todas'])}
+                              className="text-[11px] font-semibold text-blue-400 hover:text-blue-300 transition-colors cursor-pointer"
+                            >
+                              Resetar
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Opção TODAS */}
+                        <button
+                          type="button"
+                          onClick={() => toggleDateSelection('Todas')}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all mb-2.5 cursor-pointer ${
+                            isAllDatesSelected
+                              ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40'
+                              : 'bg-zinc-800 text-slate-300 border border-white/5 hover:bg-zinc-700'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2">
+                            <span className={`w-4 h-4 rounded flex items-center justify-center text-[10px] font-black ${
+                              isAllDatesSelected ? 'bg-blue-500 text-white' : 'border border-white/30'
+                            }`}>
+                              {isAllDatesSelected ? '✓' : ''}
+                            </span>
+                            TODAS (Mês Inteiro)
+                          </span>
+                        </button>
+
+                        {/* Grid de Dias do Mês */}
+                        <div className="mb-2">
+                          <div className="flex items-center justify-between mb-1.5 px-0.5">
+                            <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Dias do Mês</span>
+                            <span className="text-[10px] text-slate-400 font-semibold">
+                              {isAllDatesSelected ? 'Todas as datas' : `${selectedDates.length} sel.`}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-7 gap-1 max-h-44 overflow-y-auto p-1 bg-zinc-950/60 rounded-xl border border-white/5">
+                            {(() => {
+                              const year = parseInt(monthFilter.split('-')[0]);
+                              const month = parseInt(monthFilter.split('-')[1]);
+                              const daysInMonth = isNaN(year) || isNaN(month) ? 31 : new Date(year, month, 0).getDate();
+                              const daysList = [];
+                              for (let d = 1; d <= daysInMonth; d++) {
+                                daysList.push(d);
+                              }
+
+                              return daysList.map(day => {
+                                const dayStr = day.toString();
+                                const isSelected = !isAllDatesSelected && selectedDates.includes(dayStr);
+
+                                return (
+                                  <button
+                                    key={day}
+                                    type="button"
+                                    onClick={() => toggleDateSelection(dayStr)}
+                                    className={`h-7 rounded-md text-xs font-bold transition-all flex items-center justify-center cursor-pointer ${
+                                      isSelected
+                                        ? 'bg-blue-600 text-white shadow-md shadow-blue-500/30 ring-1 ring-blue-400'
+                                        : 'bg-zinc-800 text-slate-300 hover:bg-zinc-700 hover:text-white'
+                                    }`}
+                                    title={`Dia ${day.toString().padStart(2, '0')}`}
+                                  >
+                                    {day.toString().padStart(2, '0')}
+                                  </button>
+                                );
+                              });
+                            })()}
+                          </div>
+                        </div>
+
+                        <div className="pt-2 mt-2 border-t border-white/10 flex items-center justify-between text-[11px]">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedDates(['Todas'])}
+                            className="text-slate-400 hover:text-white transition-colors cursor-pointer"
+                          >
+                            Limpar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsDateMenuOpen(false)}
+                            className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-3 py-1 rounded-lg transition-colors shadow-sm cursor-pointer"
+                          >
+                            Concluído
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div className="flex flex-col gap-1">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Filtrar Linha</span>
@@ -2613,382 +2813,376 @@ export default function App() {
                 </div>
               </header>
 
-              {history.length > 0 ? (
-                <>
-                  {/* Gráfico de Evolução e Índice de Quebra Consolidado */}
-                  <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-                    <div className="lg:col-span-3 bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
-                      <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
-                        <BarChart3 size={20} className="text-indigo-400" />
-                        Tendência de OEE Global (%)
-                      </h3>
-                      <div className="h-[400px] w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart data={[...history].reverse()}>
-                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                            <XAxis 
-                              dataKey="created_at" 
-                              tickFormatter={(str) => new Date(str).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
-                              tick={{ fontSize: 10, fill: '#94a3b8' }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <YAxis 
-                              domain={[0, 100]}
-                              tick={{ fontSize: 10, fill: '#94a3b8' }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <Tooltip 
-                              content={<CustomOEEEvolutionTooltip />}
-                            />
-                            <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
-                              {[...history].reverse().map((entry, index) => (
-                                <Cell 
-                                  key={`cell-${index}`} 
-                                  fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
-                                />
-                              ))}
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
+              {/* Gráfico de Evolução e Índice de Quebra Consolidado */}
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+                <div className="lg:col-span-3 bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
+                  <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
+                    <BarChart3 size={20} className="text-indigo-400" />
+                    Tendência de OEE Global (%)
+                  </h3>
+                  <div className="h-[400px] w-full">
+                    {history.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={[...history].reverse()}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                          <XAxis 
+                            dataKey="created_at" 
+                            tickFormatter={(str) => new Date(str).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
+                            tick={{ fontSize: 10, fill: '#94a3b8' }}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <YAxis 
+                            domain={[0, 100]}
+                            tick={{ fontSize: 10, fill: '#94a3b8' }}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <Tooltip 
+                            content={<CustomOEEEvolutionTooltip />}
+                          />
+                          <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
+                            {[...history].reverse().map((entry, index) => (
+                              <Cell 
+                                key={`cell-${index}`} 
+                                fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
+                              />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-500 text-sm italic border border-dashed border-white/5 rounded-2xl">
+                        Nenhum registro para o período selecionado
                       </div>
-                    </div>
-
-                    <div className="lg:col-span-1 bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[620px]">
-                      <div className="relative z-10 flex flex-col h-full gap-2">
-                        {/* Top Section: Índice de Quebra */}
-                        <div className="flex-1 flex flex-col">
-                          <div className="flex items-center gap-4 mb-6">
-                            <div className="w-12 h-12 bg-red-500/10 rounded-2xl flex items-center justify-center border border-red-500/20">
-                              <Cpu size={22} className="text-red-400" />
-                            </div>
-                            <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest leading-tight">
-                              Índice de Quebra<br />Médio (%)
-                            </h3>
-                          </div>
-                          
-                          <div className="mb-4">
-                            <p className="text-6xl font-black tracking-tighter text-white">
-                              {consolidatedMetrics.maintenanceIndex.toFixed(1)}%
-                            </p>
-                          </div>
-
-                          <div className={`flex items-center gap-2 text-sm font-bold ${consolidatedMetrics.maintenanceIndex < 5 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {consolidatedMetrics.maintenanceIndex < 5 ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-                            <span>Status: {consolidatedMetrics.maintenanceIndex < 5 ? 'Sob Controle' : 'Atenção'}</span>
-                          </div>
-                        </div>
-
-                        {/* Divider */}
-                        <div className="h-px bg-white/5 w-full my-6" />
-                        
-                        {/* Middle Section: TEEP */}
-                        <div className="flex-1 flex flex-col">
-                          <div className="flex items-center gap-4 mb-4">
-                            <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center border border-indigo-500/20">
-                              <Gauge size={22} className="text-indigo-400" />
-                            </div>
-                            <div className="flex flex-col">
-                              <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">TEEP Médio</h3>
-                              <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Total Effective Equipment Performance</span>
-                            </div>
-                          </div>
-                          <p className="text-6xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-indigo-600">
-                            {consolidatedMetrics.teep.toFixed(1)}%
-                          </p>
-                        </div>
-
-                        {/* Divider */}
-                        <div className="h-px bg-white/5 w-full my-6" />
-
-                        {/* Bottom Section: Produtividade */}
-                        <div className="flex-1 flex flex-col">
-                          <div className="flex items-center gap-4 mb-4">
-                            <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
-                              <TrendingUp size={22} className="text-emerald-400" />
-                            </div>
-                            <div className="flex flex-col">
-                              <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">Produtividade de Linhas</h3>
-                              <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Produção Real / Tempo Programado</span>
-                            </div>
-                          </div>
-                          <p className="text-5xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-emerald-400 to-teal-500">
-                            {consolidatedMetrics.productivity.toFixed(1)} <span className="text-xs font-bold tracking-normal text-emerald-400/85">fardos/h</span>
-                          </p>
-                        </div>
-                      </div>
-                      <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.03] group-hover:scale-110 transition-all duration-700 blur-sm" size={240} />
-                    </div>
+                    )}
                   </div>
-
-                  {/* Gráfico de Pareto de Paradas */}
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                    <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
-                      <h3 className="font-bold text-lg flex items-center gap-2 text-red-400 mb-8">
-                        <AlertTriangle size={20} />
-                        Pareto Não Programadas (Minutos Acumulados)
-                      </h3>
-                      <div className="h-[400px] w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart 
-                            data={consolidatedMetrics.paretoNP}
-                            margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
-                          >
-                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                            <XAxis 
-                              dataKey="name" 
-                              tick={{ fontSize: 10, fill: '#94a3b8' }}
-                              interval={0}
-                              angle={-45}
-                              textAnchor="end"
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <YAxis 
-                              tick={{ fontSize: 10, fill: '#94a3b8' }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <Tooltip 
-                              contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                              itemStyle={{ color: '#fff' }}
-                              formatter={(value: number) => [value + ' min', 'Duração']}
-                            />
-                            <Bar 
-                              dataKey="duration" 
-                              fill="#ef4444" 
-                              radius={[4, 4, 0, 0]}
-                              onClick={(data) => handleStopClick(data)}
-                              className="cursor-pointer hover:opacity-85 transition-opacity"
-                            >
-                              <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </div>
-
-                    <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
-                      <h3 className="font-bold text-lg flex items-center gap-2 text-blue-400 mb-8">
-                        <Clock size={20} />
-                        Pareto Programadas (Minutos Acumulados)
-                      </h3>
-                      <div className="h-[400px] w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <BarChart 
-                            data={consolidatedMetrics.paretoP}
-                            margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
-                          >
-                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                            <XAxis 
-                              dataKey="name" 
-                              tick={{ fontSize: 10, fill: '#94a3b8' }}
-                              interval={0}
-                              angle={-45}
-                              textAnchor="end"
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <YAxis 
-                              tick={{ fontSize: 10, fill: '#94a3b8' }}
-                              axisLine={false}
-                              tickLine={false}
-                            />
-                            <Tooltip 
-                              contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                              itemStyle={{ color: '#fff' }}
-                              formatter={(value: number) => [value + ' min', 'Duração']}
-                            />
-                            <Bar 
-                              dataKey="duration" 
-                              fill="#3b82f6" 
-                              radius={[4, 4, 0, 0]}
-                              onClick={(data) => handleStopClick(data)}
-                              className="cursor-pointer hover:opacity-85 transition-opacity"
-                            >
-                              <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* KPI Cards Consolidados */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <KPICard 
-                      title="Disponibilidade Média" 
-                      value={consolidatedMetrics.disponibilidade} 
-                      icon={<Clock className="text-blue-400" />} 
-                      color="blue"
-                      description="Média do período filtrado"
-                    />
-                    <KPICard 
-                      title="Performance Média" 
-                      value={consolidatedMetrics.performance} 
-                      icon={<TrendingUp className="text-orange-400" />} 
-                      color="orange"
-                      description="Média do período filtrado"
-                    />
-                    <KPICard 
-                      title="Qualidade Média" 
-                      value={consolidatedMetrics.qualidade} 
-                      icon={<CheckCircle2 className="text-emerald-400" />} 
-                      color="emerald"
-                      description="Média do período filtrado"
-                    />
-                    <KPICard 
-                      title="OEE Global Médio" 
-                      value={consolidatedMetrics.oee} 
-                      icon={<Gauge className="text-indigo-400" />} 
-                      color="indigo"
-                      isMain
-                      description="Média do período filtrado"
-                    />
-                  </div>
-
-                  {/* Histórico Recente Section */}
-                  <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
-                    <div className="px-8 py-5 bg-white/5 border-b border-white/10">
-                      <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
-                        <Clock size={16} className="text-blue-400" />
-                        Registros Detalhados
-                      </h3>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left">
-                        <thead>
-                          <tr className="bg-white/5 border-b border-white/10">
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Início</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Término</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perda U</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
-                            <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/10">
-                          {historyError ? (
-                            <tr>
-                              <td colSpan={8} className="px-8 py-10 text-center">
-                                <div className="flex flex-col items-center gap-2 text-red-400">
-                                  <AlertTriangle size={24} />
-                                  <p className="text-sm font-bold">Erro ao carregar histórico</p>
-                                  <p className="text-[10px] opacity-70">{historyError}</p>
-                                </div>
-                              </td>
-                            </tr>
-                          ) : history.length > 0 ? (
-                            history.map((record) => (
-                              <tr key={record.id} className="hover:bg-white/5 transition-colors group">
-                                <td className="px-3 py-3 text-[11px] text-slate-400 whitespace-nowrap">
-                                  {new Date(record.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                                </td>
-                                <td className="px-3 py-3 text-[11px] font-bold text-white whitespace-nowrap">{record.machine_name}</td>
-                                <td className="px-3 py-3 text-[11px] text-slate-400 max-w-[120px] truncate" title={record.sku}>{record.sku}</td>
-                                <td className="px-3 py-3 text-center text-[11px] text-slate-400">
-                                  {(() => {
-                                    try {
-                                      const d = JSON.parse(record.downtime_data);
-                                      return d.shiftStartTime || '-';
-                                    } catch(e) { return '-'; }
-                                  })()}
-                                </td>
-                                <td className="px-3 py-3 text-center text-[11px] text-slate-400">
-                                  {(() => {
-                                    try {
-                                      const d = JSON.parse(record.downtime_data);
-                                      return d.shiftEndTime || '-';
-                                    } catch(e) { return '-'; }
-                                  })()}
-                                </td>
-                                <td className="px-3 py-3 text-center text-[11px] text-slate-400">
-                                  {(() => {
-                                    try {
-                                      const d = JSON.parse(record.downtime_data);
-                                      return d.U?.toLocaleString() || '0';
-                                    } catch(e) { return '0'; }
-                                  })()}
-                                </td>
-                                <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.availability.toFixed(1)}%</td>
-                                <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.performance.toFixed(1)}%</td>
-                                <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.quality.toFixed(1)}%</td>
-                                <td className="px-3 py-3 text-center">
-                                  <span className={`text-[11px] font-bold px-2 py-1 rounded ${
-                                    record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
-                                    record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
-                                  }`}>
-                                    {record.oee_score.toFixed(1)}%
-                                  </span>
-                                </td>
-                                <td className="px-3 py-3 text-right">
-                                  <div className="flex items-center justify-end gap-1">
-                                    <button 
-                                      onClick={() => handleEditRecord(record)}
-                                      className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-400/10 rounded-lg transition-all"
-                                      title="Corrigir Apontamento"
-                                    >
-                                      <Pencil size={14} />
-                                    </button>
-                                    <button 
-                                      onClick={() => setSelectedRecord(record)}
-                                      className="p-1.5 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
-                                      title="Visualizar Detalhes"
-                                    >
-                                      <Search size={14} />
-                                    </button>
-                                    {currentUser.isAdmin && (
-                                      <button 
-                                        onClick={() => deleteRecord(record.id)}
-                                        className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
-                                        title="Excluir Registro"
-                                      >
-                                        <Trash2 size={14} />
-                                      </button>
-                                    )}
-                                  </div>
-                                </td>
-                              </tr>
-                            ))
-                          ) : (
-                            <tr>
-                              <td colSpan={11} className="px-8 py-10 text-center text-slate-500 text-sm italic">
-                                Nenhum registro encontrado para esta linha.
-                              </td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div className="flex flex-col items-center justify-center py-20 bg-zinc-900/30 rounded-3xl border border-dashed border-white/10">
-                  <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-6">
-                    <Search size={32} className="text-slate-500" />
-                  </div>
-                  <h3 className="text-xl font-bold text-white mb-2">Nenhum dado encontrado</h3>
-                  <p className="text-slate-400 max-w-md text-center">
-                    Não encontramos registros de produção para os filtros selecionados.
-                  </p>
-                  <p className="text-slate-500 text-sm mt-1 text-center">
-                    Por favor, tente selecionar outra data, mês ou linha de produção.
-                  </p>
-                  <button 
-                    onClick={() => setActiveTab('inputs')}
-                    className="mt-8 text-blue-400 hover:text-blue-300 font-bold flex items-center gap-2 transition-colors"
-                  >
-                    Ir para Parâmetros/Inputs
-                    <ArrowRight size={16} />
-                  </button>
                 </div>
-              )}
+
+                <div className="lg:col-span-1 bg-zinc-900 rounded-3xl p-10 text-white shadow-2xl overflow-hidden relative border border-white/10 group flex flex-col min-h-[620px]">
+                  <div className="relative z-10 flex flex-col h-full gap-2">
+                    {/* Top Section: Índice de Quebra */}
+                    <div className="flex-1 flex flex-col">
+                      <div className="flex items-center gap-4 mb-6">
+                        <div className="w-12 h-12 bg-red-500/10 rounded-2xl flex items-center justify-center border border-red-500/20">
+                          <Cpu size={22} className="text-red-400" />
+                        </div>
+                        <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest leading-tight">
+                          Índice de Quebra<br />Médio (%)
+                        </h3>
+                      </div>
+                      
+                      <div className="mb-4">
+                        <p className="text-6xl font-black tracking-tighter text-white">
+                          {consolidatedMetrics.maintenanceIndex.toFixed(1)}%
+                        </p>
+                      </div>
+
+                      <div className={`flex items-center gap-2 text-sm font-bold ${consolidatedMetrics.maintenanceIndex < 5 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {consolidatedMetrics.maintenanceIndex < 5 ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                        <span>Status: {consolidatedMetrics.maintenanceIndex < 5 ? 'Sob Controle' : 'Atenção'}</span>
+                      </div>
+                    </div>
+
+                    {/* Divider */}
+                    <div className="h-px bg-white/5 w-full my-6" />
+                    
+                    {/* Middle Section: TEEP */}
+                    <div className="flex-1 flex flex-col">
+                      <div className="flex items-center gap-4 mb-4">
+                        <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center border border-indigo-500/20">
+                          <Gauge size={22} className="text-indigo-400" />
+                        </div>
+                        <div className="flex flex-col">
+                          <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">TEEP Médio</h3>
+                          <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Total Effective Equipment Performance</span>
+                        </div>
+                      </div>
+                      <p className="text-6xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-blue-400 to-indigo-600">
+                        {consolidatedMetrics.teep.toFixed(1)}%
+                      </p>
+                    </div>
+
+                    {/* Divider */}
+                    <div className="h-px bg-white/5 w-full my-6" />
+
+                    {/* Bottom Section: Produtividade */}
+                    <div className="flex-1 flex flex-col">
+                      <div className="flex items-center gap-4 mb-4">
+                        <div className="w-12 h-12 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
+                          <TrendingUp size={22} className="text-emerald-400" />
+                        </div>
+                        <div className="flex flex-col">
+                          <h3 className="font-bold text-[11px] text-slate-300 uppercase tracking-widest">Produtividade de Linhas</h3>
+                          <span className="text-[9px] text-slate-500 uppercase font-black tracking-widest mt-0.5">Produção Real / Tempo Programado</span>
+                        </div>
+                      </div>
+                      <p className="text-5xl font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-br from-emerald-400 to-teal-500">
+                        {consolidatedMetrics.productivity.toFixed(1)} <span className="text-xs font-bold tracking-normal text-emerald-400/85">fardos/h</span>
+                      </p>
+                    </div>
+                  </div>
+                  <AlertTriangle className="absolute -right-8 -bottom-8 opacity-[0.03] group-hover:scale-110 transition-all duration-700 blur-sm" size={240} />
+                </div>
+              </div>
+
+              {/* Gráfico de Pareto de Paradas */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                  <h3 className="font-bold text-lg flex items-center gap-2 text-red-400 mb-8">
+                    <AlertTriangle size={20} />
+                    Pareto Não Programadas (Minutos Acumulados)
+                  </h3>
+                  <div className="h-[400px] w-full">
+                    {consolidatedMetrics.paretoNP.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart 
+                          data={consolidatedMetrics.paretoNP}
+                          margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                          <XAxis 
+                            dataKey="name" 
+                            tick={{ fontSize: 10, fill: '#94a3b8' }}
+                            interval={0}
+                            angle={-45}
+                            textAnchor="end"
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <YAxis 
+                            tick={{ fontSize: 10, fill: '#94a3b8' }}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <Tooltip 
+                            contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                            itemStyle={{ color: '#fff' }}
+                            formatter={(value: number) => [value + ' min', 'Duração']}
+                          />
+                          <Bar 
+                            dataKey="duration" 
+                            fill="#ef4444" 
+                            radius={[4, 4, 0, 0]}
+                            onClick={(data) => handleStopClick(data)}
+                            className="cursor-pointer hover:opacity-85 transition-opacity"
+                          >
+                            <LabelList dataKey="duration" position="top" style={{ fill: '#ef4444', fontSize: 11, fontWeight: 'bold' }} />
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-500 text-sm italic border border-dashed border-white/5 rounded-2xl">
+                        Sem paradas não programadas no período
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                  <h3 className="font-bold text-lg flex items-center gap-2 text-blue-400 mb-8">
+                    <Clock size={20} />
+                    Pareto Programadas (Minutos Acumulados)
+                  </h3>
+                  <div className="h-[400px] w-full">
+                    {consolidatedMetrics.paretoP.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart 
+                          data={consolidatedMetrics.paretoP}
+                          margin={{ top: 20, right: 30, left: 20, bottom: 100 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                          <XAxis 
+                            dataKey="name" 
+                            tick={{ fontSize: 10, fill: '#94a3b8' }}
+                            interval={0}
+                            angle={-45}
+                            textAnchor="end"
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <YAxis 
+                            tick={{ fontSize: 10, fill: '#94a3b8' }}
+                            axisLine={false}
+                            tickLine={false}
+                          />
+                          <Tooltip 
+                            contentStyle={{ backgroundColor: '#18181b', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                            itemStyle={{ color: '#fff' }}
+                            formatter={(value: number) => [value + ' min', 'Duração']}
+                          />
+                          <Bar 
+                            dataKey="duration" 
+                            fill="#3b82f6" 
+                            radius={[4, 4, 0, 0]}
+                            onClick={(data) => handleStopClick(data)}
+                            className="cursor-pointer hover:opacity-85 transition-opacity"
+                          >
+                            <LabelList dataKey="duration" position="top" style={{ fill: '#3b82f6', fontSize: 11, fontWeight: 'bold' }} />
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-500 text-sm italic border border-dashed border-white/5 rounded-2xl">
+                        Sem paradas programadas no período
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* KPI Cards Consolidados */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                <KPICard 
+                  title="Disponibilidade Média" 
+                  value={consolidatedMetrics.disponibilidade} 
+                  icon={<Clock className="text-blue-400" />} 
+                  color="blue"
+                  description="Média do período filtrado"
+                />
+                <KPICard 
+                  title="Performance Média" 
+                  value={consolidatedMetrics.performance} 
+                  icon={<TrendingUp className="text-orange-400" />} 
+                  color="orange"
+                  description="Média do período filtrado"
+                />
+                <KPICard 
+                  title="Qualidade Média" 
+                  value={consolidatedMetrics.qualidade} 
+                  icon={<CheckCircle2 className="text-emerald-400" />} 
+                  color="emerald"
+                  description="Média do período filtrado"
+                />
+                <KPICard 
+                  title="OEE Global Médio" 
+                  value={consolidatedMetrics.oee} 
+                  icon={<Gauge className="text-indigo-400" />} 
+                  color="indigo"
+                  isMain
+                  description="Média do período filtrado"
+                />
+              </div>
+
+              {/* Histórico Recente Section */}
+              <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
+                <div className="px-8 py-5 bg-white/5 border-b border-white/10">
+                  <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
+                    <Clock size={16} className="text-blue-400" />
+                    Registros Detalhados
+                  </h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-white/5 border-b border-white/10">
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data/Hora</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Linha</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">SKU</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Início</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Término</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perda U</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Disp.</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Perf.</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">Qual.</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">OEE</th>
+                        <th className="px-3 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/10">
+                      {historyError ? (
+                        <tr>
+                          <td colSpan={11} className="px-8 py-10 text-center">
+                            <div className="flex flex-col items-center gap-2 text-red-400">
+                              <AlertTriangle size={24} />
+                              <p className="text-sm font-bold">Erro ao carregar histórico</p>
+                              <p className="text-[10px] opacity-70">{historyError}</p>
+                            </div>
+                          </td>
+                        </tr>
+                      ) : history.length > 0 ? (
+                        history.map((record) => (
+                          <tr key={record.id} className="hover:bg-white/5 transition-colors group">
+                            <td className="px-3 py-3 text-[11px] text-slate-400 whitespace-nowrap">
+                              {new Date(record.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                            </td>
+                            <td className="px-3 py-3 text-[11px] font-bold text-white whitespace-nowrap">{record.machine_name}</td>
+                            <td className="px-3 py-3 text-[11px] text-slate-400 max-w-[120px] truncate" title={record.sku}>{record.sku}</td>
+                            <td className="px-3 py-3 text-center text-[11px] text-slate-400">
+                              {(() => {
+                                try {
+                                  const d = JSON.parse(record.downtime_data);
+                                  return d.shiftStartTime || '-';
+                                } catch(e) { return '-'; }
+                              })()}
+                            </td>
+                            <td className="px-3 py-3 text-center text-[11px] text-slate-400">
+                              {(() => {
+                                try {
+                                  const d = JSON.parse(record.downtime_data);
+                                  return d.shiftEndTime || '-';
+                                } catch(e) { return '-'; }
+                              })()}
+                            </td>
+                            <td className="px-3 py-3 text-center text-[11px] text-slate-400">
+                              {(() => {
+                                try {
+                                  const d = JSON.parse(record.downtime_data);
+                                  return d.U?.toLocaleString() || '0';
+                                } catch(e) { return '0'; }
+                              })()}
+                            </td>
+                            <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.availability.toFixed(1)}%</td>
+                            <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.performance.toFixed(1)}%</td>
+                            <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.quality.toFixed(1)}%</td>
+                            <td className="px-3 py-3 text-center">
+                              <span className={`text-[11px] font-bold px-2 py-1 rounded ${
+                                record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
+                                record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
+                              }`}>
+                                {record.oee_score.toFixed(1)}%
+                              </span>
+                            </td>
+                            <td className="px-3 py-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <button 
+                                  onClick={() => handleEditRecord(record)}
+                                  className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-400/10 rounded-lg transition-all"
+                                  title="Corrigir Apontamento"
+                                >
+                                  <Pencil size={14} />
+                                </button>
+                                <button 
+                                  onClick={() => setSelectedRecord(record)}
+                                  className="p-1.5 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
+                                  title="Visualizar Detalhes"
+                                >
+                                  <Search size={14} />
+                                </button>
+                                {currentUser.isAdmin && (
+                                  <button 
+                                    onClick={() => deleteRecord(record.id)}
+                                    className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+                                    title="Excluir Registro"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={11} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                            Nenhum registro encontrado para os filtros selecionados.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </motion.div>
           ) : activeTab === 'inputs' ? (
             <motion.div 
@@ -3851,4 +4045,3 @@ function StopTraceModal({
     </div>
   );
 }
-
