@@ -91,21 +91,133 @@ export class ErrorBoundary extends React.Component<{children: React.ReactNode}, 
   }
 }
 
+// Diretrizes de Cores do Indicador OEE
+// < 50% (VERMELHO)
+// 50% a 55% (AMARELO)
+// 55% a 65% (VERDE MINT #99EDC3)
+// 65% a 75% (VERDE GREEN #3CB043)
+// > 75% (AZUL)
+export interface OEEColorConfig {
+  hex: string;
+  name: string;
+  label: string;
+  rangeText: string;
+  bgClass: string;
+  textClass: string;
+  borderClass: string;
+  badgeBg: string;
+  badgeBorder: string;
+  badgeText: string;
+}
+
+export const OEE_COLOR_THRESHOLDS = [
+  { min: 0, max: 50, hex: '#ef4444', name: 'VERMELHO', label: 'Crítico', rangeText: '< 50%' },
+  { min: 50, max: 55, hex: '#eab308', name: 'AMARELO', label: 'Atenção', rangeText: '50% a 55%' },
+  { min: 55, max: 65, hex: '#99EDC3', name: 'VERDE MINT', label: 'Moderado', rangeText: '55% a 65%' },
+  { min: 65, max: 75, hex: '#3CB043', name: 'VERDE GREEN', label: 'Bom', rangeText: '65% a 75%' },
+  { min: 75, max: Infinity, hex: '#3b82f6', name: 'AZUL', label: 'Excelente', rangeText: '> 75%' }
+];
+
+export const getOEEColorInfo = (oee: number): OEEColorConfig => {
+  if (oee < 50) {
+    return {
+      hex: '#ef4444',
+      name: 'VERMELHO',
+      label: 'Crítico',
+      rangeText: '< 50%',
+      bgClass: 'bg-red-500/20',
+      textClass: 'text-red-400',
+      borderClass: 'border-red-500/30',
+      badgeBg: 'rgba(239, 68, 68, 0.15)',
+      badgeBorder: 'rgba(239, 68, 68, 0.35)',
+      badgeText: '#ef4444'
+    };
+  }
+  if (oee <= 55) {
+    return {
+      hex: '#eab308',
+      name: 'AMARELO',
+      label: 'Atenção',
+      rangeText: '50% a 55%',
+      bgClass: 'bg-yellow-500/20',
+      textClass: 'text-yellow-400',
+      borderClass: 'border-yellow-500/30',
+      badgeBg: 'rgba(234, 179, 8, 0.15)',
+      badgeBorder: 'rgba(234, 179, 8, 0.35)',
+      badgeText: '#eab308'
+    };
+  }
+  if (oee <= 65) {
+    return {
+      hex: '#99EDC3',
+      name: 'VERDE MINT',
+      label: 'Moderado',
+      rangeText: '55% a 65%',
+      bgClass: 'bg-[#99EDC3]/20',
+      textClass: 'text-[#99EDC3]',
+      borderClass: 'border-[#99EDC3]/30',
+      badgeBg: 'rgba(153, 237, 195, 0.15)',
+      badgeBorder: 'rgba(153, 237, 195, 0.35)',
+      badgeText: '#99EDC3'
+    };
+  }
+  if (oee <= 75) {
+    return {
+      hex: '#3CB043',
+      name: 'VERDE GREEN',
+      label: 'Bom',
+      rangeText: '65% a 75%',
+      bgClass: 'bg-[#3CB043]/20',
+      textClass: 'text-[#3CB043]',
+      borderClass: 'border-[#3CB043]/30',
+      badgeBg: 'rgba(60, 176, 67, 0.15)',
+      badgeBorder: 'rgba(60, 176, 67, 0.35)',
+      badgeText: '#3CB043'
+    };
+  }
+  return {
+    hex: '#3b82f6',
+    name: 'AZUL',
+    label: 'Excelente',
+    rangeText: '> 75%',
+    bgClass: 'bg-blue-500/20',
+    textClass: 'text-blue-400',
+    borderClass: 'border-blue-500/30',
+    badgeBg: 'rgba(59, 130, 246, 0.15)',
+    badgeBorder: 'rgba(59, 130, 246, 0.35)',
+    badgeText: '#3b82f6'
+  };
+};
+
+export const getOEEColorHex = (oee: number): string => {
+  return getOEEColorInfo(oee).hex;
+};
+
 // Custom Tooltip for OEE Evolution Chart
 const CustomOEEEvolutionTooltip = ({ active, payload, label }: any) => {
   if (active && payload && payload.length) {
     const oee = payload[0].value;
-    const color = oee >= 85 ? '#10b981' : oee >= 65 ? '#3b82f6' : '#ef4444';
+    const colorInfo = getOEEColorInfo(oee);
     return (
-      <div className="bg-zinc-900 border border-white/10 p-3 rounded-xl shadow-xl">
-        <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">
+      <div className="bg-zinc-900 border border-white/10 p-3.5 rounded-2xl shadow-2xl backdrop-blur-md">
+        <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1.5">
           {new Date(label).toLocaleString('pt-BR')}
         </p>
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
-          <p className="text-sm font-bold" style={{ color }}>
+          <div className="w-2.5 h-2.5 rounded-full ring-2 ring-white/10" style={{ backgroundColor: colorInfo.hex }} />
+          <p className="text-sm font-black" style={{ color: colorInfo.hex }}>
             OEE: {oee.toFixed(1)}%
           </p>
+          <span 
+            className="text-[9px] font-extrabold px-1.5 py-0.5 rounded border"
+            style={{ 
+              backgroundColor: colorInfo.badgeBg, 
+              color: colorInfo.badgeText, 
+              borderColor: colorInfo.badgeBorder 
+            }}
+          >
+            {colorInfo.rangeText}
+          </span>
         </div>
       </div>
     );
@@ -240,6 +352,102 @@ interface User {
 const MAIN_ADMIN_EMAIL = 'josemarcelolustosa@gmail.com';
 // ---------------------------------------------------------------
 
+// --- CONFIGURAÇÃO DAS LINHAS DE PRODUÇÃO (LAYOUT DA FÁBRICA) ---
+export const PRODUCTION_LINES = [
+  'Linha 01',
+  'Linha 02',
+  'Linha 03',
+  'Linha 04',
+  'Linha 05',
+  'Linha 06',
+  'Linha 07',
+  'Linha 08',
+  'Linha 09'
+];
+
+export const LINE_MAPPING_DE_PARA: Record<string, string> = {
+  'Linha 01': 'Linha 09',
+  'Linha 02': 'Linha 07',
+  'Linha 03': 'Linha 06',
+  'Linha 04': 'Linha 05',
+  'Linha 05': 'Linha 04',
+  'Linha 06': 'Linha 03',
+  'Linha 07': 'Linha 02',
+  'Linha 08': 'Linha 01',
+  'Linha 09': 'Linha 08',
+  'Linha 1': 'Linha 09',
+  'Linha 2': 'Linha 07',
+  'Linha 3': 'Linha 06',
+  'Linha 4': 'Linha 05',
+  'Linha 5': 'Linha 04',
+  'Linha 6': 'Linha 03',
+  'Linha 7': 'Linha 02',
+  'Linha 8': 'Linha 01',
+  'Linha 9': 'Linha 08',
+};
+
+export const LINE_RENUMBERING_TABLE = [
+  { de: 'Linha 01', deNum: 1, para: 'Linha 09', paraNum: 9 },
+  { de: 'Linha 02', deNum: 2, para: 'Linha 07', paraNum: 7 },
+  { de: 'Linha 03', deNum: 3, para: 'Linha 06', paraNum: 6 },
+  { de: 'Linha 04', deNum: 4, para: 'Linha 05', paraNum: 5 },
+  { de: 'Linha 05', deNum: 5, para: 'Linha 04', paraNum: 4 },
+  { de: 'Linha 06', deNum: 6, para: 'Linha 03', paraNum: 3 },
+  { de: 'Linha 07', deNum: 7, para: 'Linha 02', paraNum: 2 },
+  { de: 'Linha 08', deNum: 8, para: 'Linha 01', paraNum: 1 },
+  { de: 'Linha 09', deNum: 9, para: 'Linha 08', paraNum: 8 },
+];
+
+// Helper para migrar registros no localStorage
+export const migrateLocalRecordsHelper = (): number => {
+  try {
+    const raw = localStorage.getItem('oee_local_records');
+    if (!raw) return 0;
+    const localRecords = JSON.parse(raw);
+    if (!Array.isArray(localRecords) || localRecords.length === 0) return 0;
+    
+    let count = 0;
+    const updated = localRecords.map(rec => {
+      let changed = false;
+      let newMachineName = rec.machine_name;
+      if (rec.machine_name && LINE_MAPPING_DE_PARA[rec.machine_name]) {
+        newMachineName = LINE_MAPPING_DE_PARA[rec.machine_name];
+        changed = true;
+      }
+      
+      let newDowntimeData = rec.downtime_data;
+      if (rec.downtime_data) {
+        try {
+          const parsed = typeof rec.downtime_data === 'string' ? JSON.parse(rec.downtime_data) : rec.downtime_data;
+          if (parsed && parsed.line && LINE_MAPPING_DE_PARA[parsed.line]) {
+            parsed.line = LINE_MAPPING_DE_PARA[parsed.line];
+            newDowntimeData = JSON.stringify(parsed);
+            changed = true;
+          }
+        } catch (_) {}
+      }
+
+      if (changed) {
+        count++;
+        return {
+          ...rec,
+          machine_name: newMachineName,
+          downtime_data: newDowntimeData
+        };
+      }
+      return rec;
+    });
+
+    if (count > 0) {
+      localStorage.setItem('oee_local_records', JSON.stringify(updated));
+    }
+    return count;
+  } catch (err) {
+    console.error("Erro na migração local:", err);
+    return 0;
+  }
+};
+
 // Safe localStorage helper to prevent JSON parsing crashes
 const safeGetLocalStorage = <T,>(key: string, defaultValue: T): T => {
   try {
@@ -257,11 +465,9 @@ const safeGetLocalStorage = <T,>(key: string, defaultValue: T): T => {
   }
 };
 
-
-
 const generateSampleLocalRecords = () => {
   const records = [];
-  const lines = ['Linha 01', 'Linha 02'];
+  const lines = PRODUCTION_LINES;
   const skus = ['Água Mineral 500ml', 'Água Mineral 1.5L', 'Água com Gás 500ml'];
   
   const today = new Date();
@@ -326,13 +532,16 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [adminTab, setAdminTab] = useState<'users' | 'stops'>('users');
+  const [adminTab, setAdminTab] = useState<'users' | 'stops' | 'lines'>('users');
   const [users, setUsers] = useState<User[]>([]);
   const [stopCodes, setStopCodes] = useState<StopCode[]>(DEFAULT_STOP_CODES);
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [isLoadingStops, setIsLoadingStops] = useState(false);
   const [editingStop, setEditingStop] = useState<StopCode | null>(null);
   const [newStop, setNewStop] = useState<Partial<StopCode>>({ category: 'NP' });
+  const [isMigratingLines, setIsMigratingLines] = useState(false);
+  const [migrationReport, setMigrationReport] = useState<string | null>(null);
+  const [migrationStatusType, setMigrationStatusType] = useState<'success' | 'info' | 'error'>('info');
 
   // Initial state based on the provided example image
   const [inputs, setInputs] = useState<OEEInputs>(() => {
@@ -766,7 +975,106 @@ export default function App() {
 
   useEffect(() => {
     fetchStopCodes(); // Carrega paradas logo no início para garantir que o inputs funcione
+    
+    // Auto-migração local inicial (para garantir que dados locais existentes na Linha 07, etc. passem para a Linha 02, etc.)
+    const migrationKey = 'oee_lines_renumbered_2026_layout_v1';
+    if (!localStorage.getItem(migrationKey)) {
+      const count = migrateLocalRecordsHelper();
+      localStorage.setItem(migrationKey, 'true');
+      if (count > 0) {
+        console.log(`Auto-migração local concluída: ${count} registros remapeados para novas linhas.`);
+      }
+    }
   }, []);
+
+  const executeLineMigration = async () => {
+    setIsMigratingLines(true);
+    setMigrationReport(null);
+    try {
+      // 1. Migra dados locais primeiro
+      const localMigratedCount = migrateLocalRecordsHelper();
+      localStorage.setItem('oee_lines_renumbered_2026_layout_v1', 'true');
+
+      if (useLocalFallback || !isSupabaseConfigured) {
+        setMigrationStatusType('success');
+        setMigrationReport(`Migração concluída com sucesso no armazenamento local! ${localMigratedCount} registro(s) foram remapeados para a nova numeração (ex: Linha 07 ➔ Linha 02, Linha 01 ➔ Linha 09).`);
+        setIsMigratingLines(false);
+        fetchHistory();
+        if (activeTab === 'dashboard') fetchDashboardRecord();
+        return;
+      }
+
+      // 2. Migra dados no Supabase
+      const { data: allRecords, error: fetchErr } = await supabase
+        .from('oee_records')
+        .select('id, machine_name, downtime_data');
+      
+      if (fetchErr) throw fetchErr;
+
+      if (!allRecords || allRecords.length === 0) {
+        setMigrationStatusType('info');
+        setMigrationReport(`Nenhum registro encontrado no Supabase para migrar. Localmente: ${localMigratedCount} registro(s) remapeado(s).`);
+        setIsMigratingLines(false);
+        return;
+      }
+
+      let supabaseMigratedCount = 0;
+      for (const record of allRecords) {
+        let needsUpdate = false;
+        let newMachineName = record.machine_name;
+        
+        if (record.machine_name && LINE_MAPPING_DE_PARA[record.machine_name]) {
+          newMachineName = LINE_MAPPING_DE_PARA[record.machine_name];
+          needsUpdate = true;
+        }
+
+        let newDowntimeData = record.downtime_data;
+        if (record.downtime_data) {
+          try {
+            const parsed = typeof record.downtime_data === 'string' ? JSON.parse(record.downtime_data) : record.downtime_data;
+            if (parsed && parsed.line && LINE_MAPPING_DE_PARA[parsed.line]) {
+              parsed.line = LINE_MAPPING_DE_PARA[parsed.line];
+              newDowntimeData = JSON.stringify(parsed);
+              needsUpdate = true;
+            }
+          } catch (_) {}
+        }
+
+        if (needsUpdate) {
+          const { error: updateErr } = await supabase
+            .from('oee_records')
+            .update({
+              machine_name: newMachineName,
+              downtime_data: newDowntimeData
+            })
+            .eq('id', record.id);
+
+          if (!updateErr) {
+            supabaseMigratedCount++;
+          }
+        }
+      }
+
+      setMigrationStatusType('success');
+      let reportMsg = `Migração concluída com sucesso! ${supabaseMigratedCount} registro(s) histórico(s) no Supabase foram remapeados para a nova numeração das linhas.`;
+      if (localMigratedCount > 0) {
+        reportMsg += ` (${localMigratedCount} registro(s) locais também atualizados).`;
+      }
+      setMigrationReport(reportMsg);
+
+      // Recarrega histórico e dashboard imediatamente
+      fetchHistory();
+      if (activeTab === 'dashboard') {
+        fetchDashboardRecord();
+      }
+    } catch (err: any) {
+      console.error('Erro na migração de linhas:', err);
+      setMigrationStatusType('error');
+      setMigrationReport(`Erro durante a migração: ${err.message || 'Falha desconhecida'}`);
+    } finally {
+      setIsMigratingLines(false);
+    }
+  };
 
   // Carregar histórico do Supabase
   const fetchHistory = async () => {
@@ -1287,15 +1595,17 @@ export default function App() {
       - Perda por Qualidade: ${inputs.U} garrafas (Calculada via Contador: ${inputs.initialCounter} -> ${inputs.finalCounter})
       - Redução de Velocidade (Perda de Performance): ${results.S.toFixed(1)}h
       
-      GUIA DE CALIBRAÇÃO DE TOM (REFERÊNCIA):
-      - EXCELENTE (Classe Mundial): OEE > 85%, Disp > 90%, Perf > 95%, Qual > 99.5%.
-        * Tom: Elogioso, focado em manutenção de padrão e ajustes finos. Use termos como "Alta Performance", "Estabilidade", "Classe Mundial".
-      - BOM: OEE 75-85%, Disp 85-90%, Perf 90-95%, Qual 98-99.5%.
-        * Tom: Positivo, mas identifica oportunidades claras de otimização. Use "Bom desempenho", "Operação consistente".
-      - ACEITÁVEL: OEE 65-75%, Disp 80-85%, Perf 85-90%, Qual 97-98%.
-        * Tom: Neutro, focado em perdas moderadas. Use "Desempenho regular", "Necessita monitoramento".
-      - RUIM / CRÍTICO: Abaixo dos níveis acima.
-        * Tom: Alerta, focado em perdas severas. Use "Gargalo crítico", "Impacto severo".
+      GUIA DE CALIBRAÇÃO DE TOM (REFERÊNCIA SEGUNDO DIRETRIZES OEE):
+      - EXCELENTE / CLASSE MUNDIAL (> 75% - AZUL):
+        * Tom: Elogioso, focado em estabilidade, boas práticas e sustentação de resultados. Use termos como "Alta Performance", "Operação de Excelência".
+      - BOM (65% a 75% - VERDE GREEN #3CB043):
+        * Tom: Positivo, reconhecendo boa eficiência e sugerindo ajustes finos de produtividade. Use "Bom desempenho", "Operação consistente".
+      - MODERADO / ACEITÁVEL (55% a 65% - VERDE MINT #99EDC3):
+        * Tom: Neutro e construtivo, focando em oportunidades de ganhos e redução de pequenas paradas. Use "Desempenho moderado", "Potencial de otimização".
+      - ATENÇÃO (50% a 55% - AMARELO):
+        * Tom: Alerta preventivo, focando em perdas que demandam monitoramento próximo. Use "Ponto de atenção", "Necessidade de controle de perdas".
+      - CRÍTICO (< 50% - VERMELHO):
+        * Tom: Alerta urgente, focado em gargalos severos e impacto direto na disponibilidade/performance. Use "Gargalo crítico", "Impacto severo".
 
       ESTRUTURA DA RESPOSTA:
       1. Título: **<u>DIAGNÓSTICO TÉCNICO E CAUSAS-RAIZ</u>**
@@ -2027,18 +2337,24 @@ export default function App() {
                   <h2 className="text-3xl font-bold tracking-tight text-white">Painel Administrativo</h2>
                   <p className="text-slate-400 mt-1">Configurações globais e gestão de dados.</p>
                 </div>
-                <div className="flex bg-zinc-900 border border-white/10 p-1 rounded-2xl">
+                <div className="flex bg-zinc-900 border border-white/10 p-1 rounded-2xl flex-wrap gap-1">
                   <button 
                     onClick={() => setAdminTab('users')}
-                    className={`px-6 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'users' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:text-white'}`}
+                    className={`px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'users' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:text-white'}`}
                   >
                     Usuários
                   </button>
                   <button 
                     onClick={() => setAdminTab('stops')}
-                    className={`px-6 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'stops' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:text-white'}`}
+                    className={`px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'stops' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:text-white'}`}
                   >
                     Tabela de Paradas
+                  </button>
+                  <button 
+                    onClick={() => setAdminTab('lines')}
+                    className={`px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'lines' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    Layout & Linhas (DE ➔ PARA)
                   </button>
                 </div>
               </header>
@@ -2171,7 +2487,7 @@ export default function App() {
                 </div>
               </div>
             </motion.div>
-          ) : (
+          ) : adminTab === 'stops' ? (
                   <motion.div 
                     key="stops-tab"
                     initial={{ opacity: 0, x: 20 }}
@@ -2312,6 +2628,107 @@ export default function App() {
                       </div>
                     </div>
                   </motion.div>
+                ) : (
+                  <motion.div
+                    key="lines-tab"
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 20 }}
+                    className="space-y-8"
+                  >
+                    {/* Banner com Informações do Layout */}
+                    <div className="bg-gradient-to-r from-indigo-900/40 via-purple-900/30 to-blue-900/40 border border-indigo-500/30 rounded-3xl p-8 shadow-xl">
+                      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+                        <div className="space-y-2 max-w-2xl">
+                          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/20 text-indigo-300 text-[10px] font-black uppercase tracking-widest border border-indigo-500/30">
+                            <RefreshCw size={12} />
+                            Layout da Fábrica Atualizado
+                          </div>
+                          <h3 className="text-2xl font-bold text-white tracking-tight">Renumeração das Linhas de Produção</h3>
+                          <p className="text-slate-300 text-sm leading-relaxed">
+                            Devido à alteração do layout fabril, as linhas de produção foram renumeradas. O mapeamento abaixo garante que <strong>todos os registros históricos (ex: dados da Linha 07) permaneçam intactos e migrem automaticamente para a nova Linha 02</strong>, preservando indicadores de OEE, paradas e turnos.
+                          </p>
+                        </div>
+                        
+                        <button
+                          onClick={executeLineMigration}
+                          disabled={isMigratingLines}
+                          className="px-8 py-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold text-sm rounded-2xl shadow-lg shadow-indigo-600/30 transition-all flex items-center gap-3 shrink-0 active:scale-95 cursor-pointer"
+                        >
+                          <RefreshCw size={18} className={isMigratingLines ? 'animate-spin' : ''} />
+                          {isMigratingLines ? 'Migrando Registros...' : 'Executar Migração DE ➔ PARA'}
+                        </button>
+                      </div>
+
+                      {migrationReport && (
+                        <div className={`mt-6 p-4 rounded-2xl border text-xs font-semibold flex items-center gap-3 ${
+                          migrationStatusType === 'success' 
+                            ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' 
+                            : migrationStatusType === 'error'
+                            ? 'bg-red-500/10 text-red-300 border-red-500/30'
+                            : 'bg-blue-500/10 text-blue-300 border-blue-500/30'
+                        }`}>
+                          <CheckCircle2 size={16} className="shrink-0" />
+                          <span>{migrationReport}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Tabela Visual DE -> PARA */}
+                    <div className="bg-zinc-900 border border-white/10 rounded-3xl p-8 shadow-xl">
+                      <div className="flex items-center justify-between mb-6">
+                        <div>
+                          <h4 className="text-base font-bold text-white uppercase tracking-wider">Tabela de Mapeamento (DE ➔ PARA)</h4>
+                          <p className="text-xs text-slate-400 mt-0.5">Configuração ativa das 9 linhas da planta.</p>
+                        </div>
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-400 bg-indigo-500/10 px-3 py-1.5 rounded-xl border border-indigo-500/20">
+                          9 Linhas Mapeadas
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        {LINE_RENUMBERING_TABLE.map((item) => (
+                          <div 
+                            key={item.de}
+                            className={`p-5 rounded-2xl border transition-all flex items-center justify-between ${
+                              item.de === 'Linha 07' 
+                                ? 'bg-indigo-500/15 border-indigo-500/50 ring-1 ring-indigo-500/40' 
+                                : 'bg-white/5 border-white/10 hover:border-white/20'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-zinc-800 flex items-center justify-center font-mono font-bold text-slate-300 border border-white/5 text-sm">
+                                {item.deNum}
+                              </div>
+                              <div>
+                                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest block">Numeração Antiga</span>
+                                <span className="text-sm font-bold text-slate-300">{item.de}</span>
+                              </div>
+                            </div>
+
+                            <div className="text-indigo-400 px-2 font-black text-base">➔</div>
+
+                            <div className="flex items-center gap-3">
+                              <div className="text-right">
+                                <span className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest block">Nova Numeração</span>
+                                <span className="text-sm font-bold text-white">{item.para}</span>
+                              </div>
+                              <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center font-mono font-bold text-white shadow-lg shadow-indigo-600/30 text-sm">
+                                {item.paraNum}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="mt-8 p-4 bg-white/5 rounded-2xl border border-white/5 flex items-center gap-3 text-xs text-slate-400">
+                        <Activity size={16} className="text-indigo-400 shrink-0" />
+                        <span>
+                          <strong>Nota:</strong> Todos os novos lançamentos feitos na aba Parâmetros já utilizam a nova numeração. Os registros históricos anteriores foram sincronizados para manter a continuidade das análises.
+                        </span>
+                      </div>
+                    </div>
+                  </motion.div>
                 )}
               </AnimatePresence>
             </motion.div>
@@ -2337,8 +2754,8 @@ export default function App() {
                         onChange={(e) => setDashboardLine(e.target.value)}
                         className="w-full bg-zinc-800/50 border border-white/10 text-white pl-11 pr-4 py-3 rounded-2xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500/50 transition-all appearance-none cursor-pointer hover:bg-zinc-800"
                       >
-                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-                          <option key={num} value={`Linha 0${num}`}>Linha 0{num}</option>
+                        {PRODUCTION_LINES.map(line => (
+                          <option key={line} value={line}>{line}</option>
                         ))}
                       </select>
                     </div>
@@ -2433,6 +2850,7 @@ export default function App() {
                       icon={<Gauge className="text-indigo-400" />} 
                       color="indigo"
                       isMain
+                      isOEE
                       description="Eficiência Global do Equipamento"
                     />
                   </div>
@@ -2505,12 +2923,22 @@ export default function App() {
                       <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm relative overflow-hidden">
                         <div className="flex justify-between items-start mb-4">
                           <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest">Análise de Perdas</h3>
-                          <div className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-tighter border ${
-                            dashboardRecord.oee_score >= 85 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 
-                            dashboardRecord.oee_score >= 65 ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'
-                          }`}>
-                            {dashboardRecord.oee_score >= 85 ? 'Classe Mundial' : dashboardRecord.oee_score >= 65 ? 'Aceitável' : 'Crítico'}
-                          </div>
+                          {(() => {
+                            const colorInfo = getOEEColorInfo(dashboardRecord.oee_score);
+                            return (
+                              <div 
+                                className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-wider border flex items-center gap-1.5"
+                                style={{
+                                  backgroundColor: colorInfo.badgeBg,
+                                  color: colorInfo.badgeText,
+                                  borderColor: colorInfo.badgeBorder
+                                }}
+                              >
+                                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colorInfo.hex }} />
+                                {colorInfo.rangeText}
+                              </div>
+                            );
+                          })()}
                         </div>
                         <div className="space-y-4">
                           <StatRow label="Redução Velocidade" value={formatNumber(dashboardData.results.S)} unit="h" color="text-orange-400" />
@@ -2798,8 +3226,8 @@ export default function App() {
                       className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all cursor-pointer min-w-[140px]"
                     >
                       <option value="Todas">Todas as Linhas</option>
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-                        <option key={num} value={`Linha 0${num}`}>Linha 0{num}</option>
+                      {PRODUCTION_LINES.map(line => (
+                        <option key={line} value={line}>{line}</option>
                       ))}
                     </select>
                   </div>
@@ -2815,47 +3243,69 @@ export default function App() {
 
               {/* Gráfico de Evolução e Índice de Quebra Consolidado */}
               <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-                <div className="lg:col-span-3 bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
-                  <h3 className="font-bold text-lg flex items-center gap-2 text-white mb-8">
-                    <BarChart3 size={20} className="text-indigo-400" />
-                    Tendência de OEE Global (%)
-                  </h3>
-                  <div className="h-[400px] w-full">
-                    {history.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={[...history].reverse()}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                          <XAxis 
-                            dataKey="created_at" 
-                            tickFormatter={(str) => new Date(str).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
-                            tick={{ fontSize: 10, fill: '#94a3b8' }}
-                            axisLine={false}
-                            tickLine={false}
-                          />
-                          <YAxis 
-                            domain={[0, 100]}
-                            tick={{ fontSize: 10, fill: '#94a3b8' }}
-                            axisLine={false}
-                            tickLine={false}
-                          />
-                          <Tooltip 
-                            content={<CustomOEEEvolutionTooltip />}
-                          />
-                          <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
-                            {[...history].reverse().map((entry, index) => (
-                              <Cell 
-                                key={`cell-${index}`} 
-                                fill={entry.oee_score >= 85 ? '#10b981' : entry.oee_score >= 65 ? '#3b82f6' : '#ef4444'} 
-                              />
-                            ))}
-                          </Bar>
-                        </BarChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="h-full flex flex-col items-center justify-center text-slate-500 text-sm italic border border-dashed border-white/5 rounded-2xl">
-                        Nenhum registro para o período selecionado
+                <div className="lg:col-span-3 bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col justify-between">
+                  <div>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                      <h3 className="font-bold text-lg flex items-center gap-2 text-white">
+                        <BarChart3 size={20} className="text-indigo-400" />
+                        Tendência de OEE Global (%)
+                      </h3>
+                      {/* Faixas OEE Legend */}
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {OEE_COLOR_THRESHOLDS.map(item => (
+                          <div 
+                            key={item.rangeText}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold border tracking-tight"
+                            style={{
+                              backgroundColor: `${item.hex}18`,
+                              borderColor: `${item.hex}35`,
+                              color: item.hex
+                            }}
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: item.hex }} />
+                            <span>{item.rangeText}</span>
+                          </div>
+                        ))}
                       </div>
-                    )}
+                    </div>
+
+                    <div className="h-[380px] w-full">
+                      {history.length > 0 ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={[...history].reverse()}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                            <XAxis 
+                              dataKey="created_at" 
+                              tickFormatter={(str) => new Date(str).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <YAxis 
+                              domain={[0, 100]}
+                              tick={{ fontSize: 10, fill: '#94a3b8' }}
+                              axisLine={false}
+                              tickLine={false}
+                            />
+                            <Tooltip 
+                              content={<CustomOEEEvolutionTooltip />}
+                            />
+                            <Bar dataKey="oee_score" radius={[4, 4, 0, 0]}>
+                              {[...history].reverse().map((entry, index) => (
+                                <Cell 
+                                  key={`cell-${index}`} 
+                                  fill={getOEEColorHex(entry.oee_score)} 
+                                />
+                              ))}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <div className="h-full flex flex-col items-center justify-center text-slate-500 text-sm italic border border-dashed border-white/5 rounded-2xl">
+                          Nenhum registro para o período selecionado
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -3060,6 +3510,7 @@ export default function App() {
                   icon={<Gauge className="text-indigo-400" />} 
                   color="indigo"
                   isMain
+                  isOEE
                   description="Média do período filtrado"
                 />
               </div>
@@ -3136,12 +3587,22 @@ export default function App() {
                             <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.performance.toFixed(1)}%</td>
                             <td className="px-3 py-3 text-center text-[11px] text-slate-300">{record.quality.toFixed(1)}%</td>
                             <td className="px-3 py-3 text-center">
-                              <span className={`text-[11px] font-bold px-2 py-1 rounded ${
-                                record.oee_score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 
-                                record.oee_score >= 65 ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'
-                              }`}>
-                                {record.oee_score.toFixed(1)}%
-                              </span>
+                              {(() => {
+                                const colorInfo = getOEEColorInfo(record.oee_score);
+                                return (
+                                  <span 
+                                    className="text-[11px] font-extrabold px-2 py-0.5 rounded border inline-flex items-center gap-1.5 shadow-sm"
+                                    style={{
+                                      backgroundColor: colorInfo.badgeBg,
+                                      color: colorInfo.badgeText,
+                                      borderColor: colorInfo.badgeBorder
+                                    }}
+                                  >
+                                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colorInfo.hex }} />
+                                    {record.oee_score.toFixed(1)}%
+                                  </span>
+                                );
+                              })()}
                             </td>
                             <td className="px-3 py-3 text-right">
                               <div className="flex items-center justify-end gap-1">
@@ -3252,8 +3713,8 @@ export default function App() {
                         onChange={(e) => handleInputChange('line', e.target.value)}
                         className="w-full bg-black border border-white/10 rounded-xl px-4 py-3.5 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all font-bold text-white text-sm appearance-none cursor-pointer"
                       >
-                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-                          <option key={num} value={`Linha 0${num}`}>Linha 0{num}</option>
+                        {PRODUCTION_LINES.map(line => (
+                          <option key={line} value={line}>{line}</option>
                         ))}
                       </select>
                     </div>
@@ -3690,10 +4151,33 @@ function RecordDetailModal({ record, stopCodes, onClose }: { record: any, stopCo
               <p className="text-[10px] font-bold text-emerald-400 uppercase mb-1">Qualidade</p>
               <p className="text-xl font-black text-white">{record.quality.toFixed(1)}%</p>
             </div>
-            <div className="bg-indigo-600 p-4 rounded-2xl shadow-lg shadow-indigo-500/20">
-              <p className="text-[10px] font-bold text-indigo-100 uppercase mb-1">OEE Score</p>
-              <p className="text-xl font-black text-white">{record.oee_score.toFixed(1)}%</p>
-            </div>
+            {(() => {
+              const colorInfo = getOEEColorInfo(record.oee_score);
+              return (
+                <div 
+                  className="p-4 rounded-2xl border shadow-lg flex flex-col justify-between"
+                  style={{
+                    backgroundColor: colorInfo.badgeBg,
+                    borderColor: colorInfo.badgeBorder
+                  }}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: colorInfo.badgeText }}>OEE Score</p>
+                    <span 
+                      className="text-[9px] font-black px-1.5 py-0.5 rounded border uppercase"
+                      style={{
+                        backgroundColor: `${colorInfo.hex}25`,
+                        color: colorInfo.hex,
+                        borderColor: `${colorInfo.hex}40`
+                      }}
+                    >
+                      {colorInfo.rangeText}
+                    </span>
+                  </div>
+                  <p className="text-xl font-black text-white">{record.oee_score.toFixed(1)}%</p>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Detailed Inputs */}
@@ -3783,14 +4267,17 @@ function RecordDetailModal({ record, stopCodes, onClose }: { record: any, stopCo
   );
 }
 
-function KPICard({ title, value, icon, color, isMain = false, description }: { 
+function KPICard({ title, value, icon, color, isMain = false, isOEE = false, description }: { 
   title: string, 
   value: number, 
   icon: React.ReactNode, 
   color: string,
   isMain?: boolean,
+  isOEE?: boolean,
   description: string
 }) {
+  const oeeColor = isOEE ? getOEEColorInfo(value) : null;
+
   const colorClasses = {
     blue: 'bg-blue-500/10 text-blue-400',
     orange: 'bg-orange-500/10 text-orange-400',
@@ -3801,16 +4288,40 @@ function KPICard({ title, value, icon, color, isMain = false, description }: {
   return (
     <motion.div 
       whileHover={{ y: -4 }}
-      className={`bg-zinc-900 p-6 rounded-3xl border border-white/10 shadow-sm flex flex-col justify-between relative overflow-hidden ${isMain ? 'ring-2 ring-indigo-500 ring-offset-4 ring-offset-black' : ''}`}
+      style={isOEE && oeeColor ? {
+        borderColor: `${oeeColor.hex}40`,
+        boxShadow: `0 10px 25px -5px ${oeeColor.hex}1a`
+      } : {}}
+      className={`bg-zinc-900 p-6 rounded-3xl border border-white/10 shadow-sm flex flex-col justify-between relative overflow-hidden ${
+        isMain && !isOEE ? 'ring-2 ring-indigo-500 ring-offset-4 ring-offset-black' : ''
+      }`}
     >
       <div className="flex items-start justify-between mb-4 relative z-10">
-        <div className={`p-3 rounded-2xl ${colorClasses}`}>
+        <div 
+          className={`p-3 rounded-2xl ${isOEE && oeeColor ? '' : colorClasses}`}
+          style={isOEE && oeeColor ? {
+            backgroundColor: `${oeeColor.hex}20`,
+            color: oeeColor.hex,
+            border: `1px solid ${oeeColor.hex}35`
+          } : {}}
+        >
           {icon}
         </div>
         <div className="text-right">
-          <span className={`text-3xl font-black tracking-tighter ${isMain ? 'text-white' : 'text-white'}`}>
+          <span 
+            className="text-3xl font-black tracking-tighter"
+            style={isOEE && oeeColor ? { color: oeeColor.hex } : { color: '#ffffff' }}
+          >
             {value.toFixed(1)}%
           </span>
+          {isOEE && oeeColor && (
+            <span 
+              className="block text-[9px] font-extrabold uppercase tracking-wider mt-0.5"
+              style={{ color: oeeColor.hex }}
+            >
+              {oeeColor.rangeText}
+            </span>
+          )}
         </div>
       </div>
       <div className="relative z-10">
@@ -3818,7 +4329,10 @@ function KPICard({ title, value, icon, color, isMain = false, description }: {
         <p className="text-[10px] text-slate-500 mt-1 leading-tight font-medium">{description}</p>
       </div>
       {isMain && (
-        <div className="absolute -right-4 -bottom-4 opacity-[0.05] text-white">
+        <div 
+          className="absolute -right-4 -bottom-4 opacity-[0.06]"
+          style={isOEE && oeeColor ? { color: oeeColor.hex } : { color: '#ffffff' }}
+        >
           <Gauge size={100} />
         </div>
       )}
