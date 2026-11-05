@@ -1,0 +1,8 @@
+{
+  "name": "OEE GUIDEWAY Dashboard",
+  "description": "Dashboard profissional para cálculo e monitoramento de OEE (Overall Equipment Effectiveness) em linhas de produção industrial.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

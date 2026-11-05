@@ -42,7 +42,10 @@ import {
   ArrowRight,
   Hash,
   Pencil,
-  X
+  X,
+  FileSpreadsheet,
+  Database,
+  Table
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
@@ -532,7 +535,7 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [adminTab, setAdminTab] = useState<'users' | 'stops' | 'lines'>('users');
+  const [adminTab, setAdminTab] = useState<'users' | 'stops' | 'lines' | 'export'>('users');
   const [users, setUsers] = useState<User[]>([]);
   const [stopCodes, setStopCodes] = useState<StopCode[]>(DEFAULT_STOP_CODES);
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
@@ -542,6 +545,8 @@ export default function App() {
   const [isMigratingLines, setIsMigratingLines] = useState(false);
   const [migrationReport, setMigrationReport] = useState<string | null>(null);
   const [migrationStatusType, setMigrationStatusType] = useState<'success' | 'info' | 'error'>('info');
+  const [isExportingExcel, setIsExportingExcel] = useState(false);
+  const [exportFeedback, setExportFeedback] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   // Initial state based on the provided example image
   const [inputs, setInputs] = useState<OEEInputs>(() => {
@@ -1184,7 +1189,323 @@ export default function App() {
     }
   };
 
-  // Excluir registro do Supabase
+  // Exportação profissional para Planilha Excel (.xlsx / XML Spreadsheet)
+  // Contendo TODOS os parâmetros de entrada, paradas calculadas, perdas e índices OEE
+  const exportToExcelHandler = async (scope: 'filtered' | 'all' = 'all') => {
+    if (!currentUser?.isAdmin) {
+      alert('Acesso restrito: Apenas administradores podem realizar o download da base de dados.');
+      return;
+    }
+
+    setIsExportingExcel(true);
+    setExportFeedback(null);
+
+    try {
+      let recordsToExport: any[] = [];
+
+      if (scope === 'filtered' && history.length > 0) {
+        recordsToExport = history;
+      } else {
+        // Buscar todos os registros do banco ou fallback local
+        if (useLocalFallback) {
+          let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+          if (localRecords.length === 0) {
+            localRecords = generateSampleLocalRecords();
+            localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+          }
+          recordsToExport = [...localRecords];
+        } else {
+          const { data, error } = await supabase
+            .from('oee_records')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+          if (error) {
+            console.warn('Erro ao consultar Supabase para exportação, usando local:', error);
+            let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+            recordsToExport = localRecords.length > 0 ? localRecords : history;
+          } else if (data && data.length > 0) {
+            recordsToExport = data;
+          } else {
+            recordsToExport = history;
+          }
+        }
+      }
+
+      if (recordsToExport.length === 0) {
+        setExportFeedback({
+          type: 'error',
+          message: 'Nenhum registro encontrado no banco de dados para exportação.'
+        });
+        setIsExportingExcel(false);
+        return;
+      }
+
+      // Ordenar por data cronológica crescente para análise temporal
+      recordsToExport.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+      // Helper para escapar strings no formato XML do Excel
+      const escapeXml = (val: any): string => {
+        if (val === null || val === undefined) return '';
+        return String(val)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&apos;');
+      };
+
+      // Cabeçalhos detalhados para Análise Crítica por IA
+      const headers = [
+        'ID_REGISTRO',
+        'DATA_REGISTRO',
+        'HORA_REGISTRO',
+        'LINHA_PRODUCAO',
+        'SKU_PRODUTO',
+        'HORA_INICIO_TURNO',
+        'HORA_TERMINO_TURNO',
+        'CONTADOR_INICIAL_GARRAFAS',
+        'CONTADOR_FINAL_GARRAFAS',
+        'GARRAFAS_LIDAS_TOTAL',
+        'PRODUCAO_REAL_FARDOS_H',
+        'FATOR_CONVERSAO_GARRAFAS_FARDO_C',
+        'PRODUCAO_REAL_GARRAFAS_HC',
+        'PERDA_QUALIDADE_GARRAFAS_U',
+        'TEMPO_TOTAL_TURNO_HORAS_A',
+        'TURNOS_PRODUCAO_K',
+        'VELOCIDADE_NOMINAL_GPH_D',
+        'PERCENTUAL_PROJETO_B',
+        'VELOCIDADE_PROJETO_GPH_F',
+        'PRODUCAO_TEORICA_FARDOS_G',
+        'TEMPO_PRODUCAO_HORAS_I',
+        'TEMPO_TOTAL_TURNO_L',
+        'TEMPO_TURNO_NAO_PROGRAMADO_M',
+        'PARADAS_PROGRAMADAS_HORAS_N',
+        'TOTAL_PARADAS_PROGRAMADAS_O',
+        'TEMPO_PROGRAMADO_HORAS_P',
+        'PARADAS_NAO_PROGRAMADAS_HORAS_Q',
+        'TEMPO_OPERACAO_HORAS_R',
+        'PERDA_VELOCIDADE_HORAS_S',
+        'TEMPO_LIQUIDO_HORAS_T',
+        'TEMPO_QUALIDADE_HORAS_V',
+        'TEMPO_UTIL_HORAS_X',
+        'DISPONIBILIDADE_PERCENT',
+        'PERFORMANCE_PERCENT',
+        'QUALIDADE_PERCENT',
+        'OEE_SCORE_PERCENT',
+        'FAIXA_OEE',
+        'CLASSIFICACAO_OEE',
+        'INDICE_MANUTENCAO_PERCENT',
+        'TEEP_PERCENT',
+        'PRODUTIVIDADE_FARDOS_HORA',
+        'TOTAL_PARADAS_REGISTRADAS',
+        'DETALHAMENTO_PARADAS_RESUMO',
+        'OBSERVACOES_NOTAS'
+      ];
+
+      // Mapeamento e cálculo de cada linha
+      const rowsXml = recordsToExport.map((rec) => {
+        let inputsData: Partial<OEEInputs> = {};
+        try {
+          if (rec.downtime_data) {
+            inputsData = typeof rec.downtime_data === 'string' 
+              ? JSON.parse(rec.downtime_data) 
+              : rec.downtime_data;
+          }
+        } catch (e) {
+          inputsData = {};
+        }
+
+        const dateObj = new Date(rec.created_at);
+        const dataFormatada = !isNaN(dateObj.getTime())
+          ? dateObj.toLocaleDateString('pt-BR')
+          : (inputsData.date || '-');
+        const horaFormatada = !isNaN(dateObj.getTime())
+          ? dateObj.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+          : '-';
+
+        const initialCounter = Number(inputsData.initialCounter) || 0;
+        const finalCounter = Number(inputsData.finalCounter) || 0;
+        const garrafasLidas = Math.max(0, finalCounter - initialCounter);
+        const H = Number(inputsData.H) || 0;
+        const C = Number(inputsData.C) || 12;
+        const totalProducaoGarrafas = H * C;
+        const U = Number(inputsData.U) || (initialCounter === 0 || finalCounter === 0 ? 0 : Math.max(0, garrafasLidas - totalProducaoGarrafas));
+
+        const A = Number(inputsData.A) || 24;
+        const B = Number(inputsData.B) || 80;
+        const D = Number(inputsData.D) || 22000;
+        const K = Number(inputsData.K) || 2;
+        const stops: StopEntry[] = Array.isArray(inputsData.stops) ? inputsData.stops : [];
+
+        // Recalcular métricas para garantir completude máxima da planilha
+        const calc = calculateOEEResults({
+          date: inputsData.date || dataFormatada,
+          sku: rec.sku || inputsData.sku || '',
+          line: rec.machine_name || inputsData.line || '',
+          A, B, C, D, H, K,
+          stops,
+          U,
+          shiftStartTime: inputsData.shiftStartTime || '',
+          shiftEndTime: inputsData.shiftEndTime || '',
+          initialCounter,
+          finalCounter
+        }, stopCodes);
+
+        const oeeScore = rec.oee_score !== undefined ? Number(rec.oee_score) : calc.oee;
+        const colorInfo = getOEEColorInfo(oeeScore);
+
+        // Resumo legível das paradas para a IA identificar causas-raiz
+        const stopsSummary = stops.map(s => {
+          const matched = stopCodes.find(c => c.code === Number(s.code));
+          const desc = matched ? matched.description : `Código ${s.code}`;
+          const cat = matched ? matched.category : 'NP';
+          const dur = s.startTime && s.endTime ? calculateDurationMinutes(s.startTime, s.endTime) : (Number(s.duration) || 0);
+          const extra = s.reasonCategory ? ` [${s.reasonCategory}: ${s.customReason || ''}]` : '';
+          return `${s.code}-${desc}(${cat}, ${dur}min${s.startTime ? ` de ${s.startTime} às ${s.endTime}` : ''})${extra}`;
+        }).join(' | ');
+
+        const cells = [
+          { type: 'String', val: rec.id || '' },
+          { type: 'String', val: dataFormatada },
+          { type: 'String', val: horaFormatada },
+          { type: 'String', val: rec.machine_name || inputsData.line || '' },
+          { type: 'String', val: rec.sku || inputsData.sku || '' },
+          { type: 'String', val: inputsData.shiftStartTime || '-' },
+          { type: 'String', val: inputsData.shiftEndTime || '-' },
+          { type: 'Number', val: initialCounter },
+          { type: 'Number', val: finalCounter },
+          { type: 'Number', val: garrafasLidas },
+          { type: 'Number', val: H },
+          { type: 'Number', val: C },
+          { type: 'Number', val: totalProducaoGarrafas },
+          { type: 'Number', val: U },
+          { type: 'Number', val: A },
+          { type: 'Number', val: K },
+          { type: 'Number', val: D },
+          { type: 'Number', val: B },
+          { type: 'Number', val: Number(calc.F.toFixed(2)) },
+          { type: 'Number', val: Number(calc.G.toFixed(2)) },
+          { type: 'Number', val: Number(calc.I.toFixed(2)) },
+          { type: 'Number', val: Number(calc.L.toFixed(2)) },
+          { type: 'Number', val: Number(calc.M.toFixed(2)) },
+          { type: 'Number', val: Number(calc.N.toFixed(2)) },
+          { type: 'Number', val: Number(calc.O.toFixed(2)) },
+          { type: 'Number', val: Number(calc.P.toFixed(2)) },
+          { type: 'Number', val: Number(calc.Q.toFixed(2)) },
+          { type: 'Number', val: Number(calc.R.toFixed(2)) },
+          { type: 'Number', val: Number(calc.S.toFixed(2)) },
+          { type: 'Number', val: Number(calc.T.toFixed(2)) },
+          { type: 'Number', val: Number(calc.V.toFixed(2)) },
+          { type: 'Number', val: Number(calc.X.toFixed(2)) },
+          { type: 'Number', val: Number((rec.availability !== undefined ? rec.availability : calc.disponibilidade).toFixed(2)) },
+          { type: 'Number', val: Number((rec.performance !== undefined ? rec.performance : calc.performance).toFixed(2)) },
+          { type: 'Number', val: Number((rec.quality !== undefined ? rec.quality : calc.qualidade).toFixed(2)) },
+          { type: 'Number', val: Number(oeeScore.toFixed(2)) },
+          { type: 'String', val: colorInfo.rangeText },
+          { type: 'String', val: colorInfo.label },
+          { type: 'Number', val: Number(calc.maintenanceIndex.toFixed(2)) },
+          { type: 'Number', val: Number(calc.teep.toFixed(2)) },
+          { type: 'Number', val: Number(calc.productivity.toFixed(2)) },
+          { type: 'Number', val: stops.length },
+          { type: 'String', val: stopsSummary || 'Nenhuma parada registrada' },
+          { type: 'String', val: rec.notes || '' }
+        ];
+
+        return `<Row>\n${cells.map(c => `  <Cell><Data ss:Type="${c.type}">${escapeXml(c.val)}</Data></Cell>`).join('\n')}\n</Row>`;
+      }).join('\n');
+
+      const headerCellsXml = headers.map(h => `  <Cell ss:StyleID="HeaderStyle"><Data ss:Type="String">${escapeXml(h)}</Data></Cell>`).join('\n');
+
+      // Geração de arquivo compatível com Excel (.xls XML Spreadsheet 2003 reconhecido universalmente pelo Excel, LibreOffice e Google Planilhas)
+      const excelXml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:html="http://www.w3.org/TR/REC-html40">
+ <DocumentProperties xmlns="urn:schemas-microsoft-com:office:office">
+  <Title>Relatorio_OEE_Guideway_Banco_de_Dados</Title>
+  <Subject>Exportacao Completa para Analise Critica por IA</Subject>
+  <Author>${escapeXml(currentUser.name)}</Author>
+  <Created>${new Date().toISOString()}</Created>
+ </DocumentProperties>
+ <Styles>
+  <Style ss:ID="Default" ss:Name="Normal">
+   <Alignment ss:Vertical="Center"/>
+   <Borders/>
+   <Font ss:FontName="Calibri" x:Family="Swiss" ss:Size="11" ss:Color="#000000"/>
+   <Interior/>
+   <NumberFormat/>
+   <Protection/>
+  </Style>
+  <Style ss:ID="HeaderStyle">
+   <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+   <Borders>
+    <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#000000"/>
+    <Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#000000"/>
+   </Borders>
+   <Font ss:FontName="Calibri" x:Family="Swiss" ss:Size="11" ss:Color="#FFFFFF" ss:Bold="1"/>
+   <Interior ss:Color="#1E3A8A" ss:Pattern="Solid"/>
+  </Style>
+ </Styles>
+ <Worksheet ss:Name="Banco_OEE_Completo">
+  <Table>
+   <Row ss:Height="24">
+${headerCellsXml}
+   </Row>
+${rowsXml}
+  </Table>
+  <WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel">
+   <Selected/>
+   <FreezePanes/>
+   <FrozenNoSplit/>
+   <SplitHorizontal>1</SplitHorizontal>
+   <TopRowBottomPane>1</TopRowBottomPane>
+   <ActivePane>2</ActivePane>
+   <Panes>
+    <Pane>
+     <Number>3</Number>
+    </Pane>
+    <Pane>
+     <Number>2</Number>
+     <ActiveRow>0</ActiveRow>
+    </Pane>
+   </Panes>
+   <ProtectObjects>False</ProtectObjects>
+   <ProtectScenarios>False</ProtectScenarios>
+  </WorksheetOptions>
+ </Worksheet>
+</Workbook>`;
+
+      const blob = new Blob([excelXml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const timestamp = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `OEE_GUIDEWAY_BANCO_DADOS_${timestamp}.xls`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      setExportFeedback({
+        type: 'success',
+        message: `Planilha Excel gerada com sucesso! ${recordsToExport.length} registro(s) exportado(s) com todas as variáveis prontas para análise crítica com IA.`
+      });
+    } catch (err: any) {
+      console.error('Falha ao exportar planilha:', err);
+      setExportFeedback({
+        type: 'error',
+        message: `Erro ao gerar a planilha Excel: ${err?.message || 'Falha desconhecida'}`
+      });
+    } finally {
+      setIsExportingExcel(false);
+    }
+  };
+
+
   const deleteRecord = async (id: string) => {
     if (!currentUser?.isAdmin) {
       alert('Apenas administradores podem excluir registros.');
@@ -2356,6 +2677,13 @@ export default function App() {
                   >
                     Layout & Linhas (DE ➔ PARA)
                   </button>
+                  <button 
+                    onClick={() => setAdminTab('export')}
+                    className={`px-5 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${adminTab === 'export' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20' : 'text-emerald-400 hover:text-white hover:bg-emerald-500/10'}`}
+                  >
+                    <FileSpreadsheet size={15} />
+                    Exportar Excel (IA)
+                  </button>
                 </div>
               </header>
 
@@ -2628,7 +2956,7 @@ export default function App() {
                       </div>
                     </div>
                   </motion.div>
-                ) : (
+                ) : adminTab === 'lines' ? (
                   <motion.div
                     key="lines-tab"
                     initial={{ opacity: 0, x: -20 }}
@@ -2726,6 +3054,146 @@ export default function App() {
                         <span>
                           <strong>Nota:</strong> Todos os novos lançamentos feitos na aba Parâmetros já utilizam a nova numeração. Os registros históricos anteriores foram sincronizados para manter a continuidade das análises.
                         </span>
+                      </div>
+                    </div>
+                  </motion.div>
+                ) : (
+                  <motion.div 
+                    key="export-tab"
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -20 }}
+                    className="space-y-6"
+                  >
+                    <div className="bg-zinc-900 border border-white/10 rounded-3xl p-8 shadow-sm">
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 pb-6 border-b border-white/10">
+                        <div className="flex items-start gap-4">
+                          <div className="p-3.5 bg-emerald-500/15 text-emerald-400 rounded-2xl border border-emerald-500/25">
+                            <FileSpreadsheet size={28} />
+                          </div>
+                          <div>
+                            <h3 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+                              Exportação do Banco de Dados para Excel
+                              <span className="text-[10px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                                Exclusivo Admin
+                              </span>
+                            </h3>
+                            <p className="text-xs text-slate-400 mt-1 max-w-2xl leading-relaxed">
+                              Gere uma planilha Excel (.xls / XML Spreadsheet 2003) contendo <strong>todas as 44 colunas</strong> de dados brutos e calculados: contadores, velocidades, tempos (A, L, M, N, O, P, Q, R, S, T, V, X), perdas de qualidade (U), paradas com causas e categorias (P e NP), e os índices OEE, Disponibilidade, Performance e Qualidade.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row gap-3 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => exportToExcelHandler('filtered')}
+                            disabled={isExportingExcel || history.length === 0}
+                            className="flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-slate-200 text-xs font-bold transition-all border border-white/10 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+                            title="Exporta somente os registros visíveis com os filtros atuais aplicados"
+                          >
+                            <Download size={16} className="text-blue-400" />
+                            <span>Exportar Filtro Atual ({history.length})</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => exportToExcelHandler('all')}
+                            disabled={isExportingExcel}
+                            className="flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-lg shadow-emerald-600/25 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                            title="Exporta todos os apontamentos de todas as linhas e meses da base de dados"
+                          >
+                            {isExportingExcel ? (
+                              <RefreshCw size={16} className="animate-spin text-white" />
+                            ) : (
+                              <FileSpreadsheet size={16} className="text-white" />
+                            )}
+                            <span>{isExportingExcel ? 'Gerando Planilha...' : 'Baixar Banco Completo (.xls)'}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Notificação de Feedback */}
+                      {exportFeedback && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: -10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className={`mt-6 p-4 rounded-2xl border flex items-center gap-3 text-xs font-medium ${
+                            exportFeedback.type === 'success' 
+                              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' 
+                              : exportFeedback.type === 'error'
+                              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+                              : 'bg-blue-500/10 border-blue-500/30 text-blue-300'
+                          }`}
+                        >
+                          {exportFeedback.type === 'success' ? (
+                            <CheckCircle2 size={18} className="shrink-0 text-emerald-400" />
+                          ) : (
+                            <AlertTriangle size={18} className="shrink-0 text-red-400" />
+                          )}
+                          <span className="flex-1">{exportFeedback.message}</span>
+                          <button 
+                            onClick={() => setExportFeedback(null)}
+                            className="p-1 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white"
+                          >
+                            <X size={14} />
+                          </button>
+                        </motion.div>
+                      )}
+
+                      {/* Cards com Instruções para IA e Metodologia */}
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+                        <div className="p-5 rounded-2xl bg-white/5 border border-white/5 flex flex-col justify-between">
+                          <div>
+                            <div className="flex items-center gap-2 text-indigo-400 text-xs font-bold uppercase tracking-wider mb-2">
+                              <Sparkles size={16} />
+                              Pronto para IA
+                            </div>
+                            <p className="text-xs text-slate-300 leading-relaxed">
+                              Colunas padronizadas em maiúsculas (ex: <code>PERDA_QUALIDADE_GARRAFAS_U</code>, <code>DETALHAMENTO_PARADAS_RESUMO</code>) para você carregar diretamente no ChatGPT, Claude ou Gemini a cada fechamento de mês.
+                            </p>
+                          </div>
+                          <span className="text-[10px] text-slate-500 font-mono mt-4 block">Formato: XML Spreadsheet 2003 (.xls)</span>
+                        </div>
+
+                        <div className="p-5 rounded-2xl bg-white/5 border border-white/5 flex flex-col justify-between">
+                          <div>
+                            <div className="flex items-center gap-2 text-blue-400 text-xs font-bold uppercase tracking-wider mb-2">
+                              <Table size={16} />
+                              44 Indicadores & Variáveis
+                            </div>
+                            <p className="text-xs text-slate-300 leading-relaxed">
+                              Cada linha possui os contadores iniciais/finais, tempos detalhados de parada programada e não-programada, índices OEE, perdas de velocidade e notas de operação.
+                            </p>
+                          </div>
+                          <span className="text-[10px] text-slate-500 font-mono mt-4 block">Compatível: Excel, Google Sheets, Calc</span>
+                        </div>
+
+                        <div className="p-5 rounded-2xl bg-white/5 border border-white/5 flex flex-col justify-between">
+                          <div>
+                            <div className="flex items-center gap-2 text-amber-400 text-xs font-bold uppercase tracking-wider mb-2">
+                              <Database size={16} />
+                              Segurança & Restrição
+                            </div>
+                            <p className="text-xs text-slate-300 leading-relaxed">
+                              Apenas contas com perfil <strong>ADMIN</strong> possuem permissão para exportar os dados brutos e confidenciais do sistema.
+                            </p>
+                          </div>
+                          <span className="text-[10px] text-slate-500 font-mono mt-4 block">Permissão: currentUser.isAdmin === true</span>
+                        </div>
+                      </div>
+
+                      {/* Prompt Sugerido para o Usuário usar com a IA */}
+                      <div className="mt-6 p-5 bg-zinc-950/60 rounded-2xl border border-white/10">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-bold text-slate-300 flex items-center gap-2">
+                            <Sparkles size={14} className="text-amber-400" />
+                            Prompt recomendado para análise crítica mensal com IA:
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 font-mono bg-black/40 p-3 rounded-xl border border-white/5 leading-relaxed select-all">
+                          &quot;Atue como um Engenheiro Especialista em Confiabilidade e Manutenção Lean OEE. Analise esta planilha mensal da nossa fábrica de bebidas. Identifique: 1) As 3 linhas com maior perda por paradas não programadas (Q); 2) As maiores causas-raiz no detalhamento de paradas; 3) O impacto da perda de qualidade (U) no OEE Score; 4) Um plano de ação no ciclo PDCA para o próximo mês.&quot;
+                        </p>
                       </div>
                     </div>
                   </motion.div>
@@ -3517,11 +3985,33 @@ export default function App() {
 
               {/* Histórico Recente Section */}
               <div className="bg-zinc-900 rounded-3xl border border-white/10 shadow-sm overflow-hidden">
-                <div className="px-8 py-5 bg-white/5 border-b border-white/10">
-                  <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
-                    <Clock size={16} className="text-blue-400" />
-                    Registros Detalhados
-                  </h3>
+                <div className="px-8 py-5 bg-white/5 border-b border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2">
+                      <Clock size={16} className="text-blue-400" />
+                      Registros Detalhados
+                    </h3>
+                    <span className="text-[10px] text-slate-500 font-bold bg-white/5 px-2 py-0.5 rounded-full border border-white/5">
+                      {history.length} registro(s)
+                    </span>
+                  </div>
+
+                  {currentUser.isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => exportToExcelHandler('filtered')}
+                      disabled={isExportingExcel || history.length === 0}
+                      className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 text-xs font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer self-start sm:self-auto"
+                      title="Download da tabela no formato de planilha Excel (.xls) para análise crítica com IA"
+                    >
+                      {isExportingExcel ? (
+                        <RefreshCw size={13} className="animate-spin text-emerald-400" />
+                      ) : (
+                        <FileSpreadsheet size={13} className="text-emerald-400" />
+                      )}
+                      <span>Exportar Planilha Excel (.xls)</span>
+                    </button>
+                  )}
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-left">
@@ -4559,3 +5049,4 @@ function StopTraceModal({
     </div>
   );
 }
+
