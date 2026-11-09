@@ -45,13 +45,19 @@ import {
   X,
   FileSpreadsheet,
   Database,
-  Table
+  Table,
+  Wrench,
+  FileText,
+  Printer,
+  Layers
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
 // Error Boundary Component
@@ -571,7 +577,9 @@ export default function App() {
     };
   });
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'inputs' | 'evolution'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inputs' | 'evolution' | 'maintenance'>('dashboard');
+  const [dashboardViewMode, setDashboardViewMode] = useState<'dia' | 'mes'>('dia');
+  const [dashboardMonth, setDashboardMonth] = useState<string>(new Date().toISOString().slice(0, 7));
   const [dashboardDate, setDashboardDate] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -591,6 +599,18 @@ export default function App() {
   const [selectedDates, setSelectedDates] = useState<string[]>(['Todas']);
   const [isDateMenuOpen, setIsDateMenuOpen] = useState<boolean>(false);
   const dateMenuRef = useRef<HTMLDivElement>(null);
+
+  // Estados da aba Manutenção Industrial
+  const [maintenanceMonth, setMaintenanceMonth] = useState<string>(new Date().toISOString().slice(0, 7));
+  const [maintenanceLine, setMaintenanceLine] = useState<string>('Todas');
+  const [allSystemRecords, setAllSystemRecords] = useState<any[]>([]);
+  const [isLoadingAllRecords, setIsLoadingAllRecords] = useState(false);
+
+  // Estados do One Page Report (OPR)
+  const [showOnePageReport, setShowOnePageReport] = useState<boolean>(false);
+  const [oprMonth, setOprMonth] = useState<string>(new Date().toISOString().slice(0, 7));
+  const [isExportingPdf, setIsExportingPdf] = useState<boolean>(false);
+  const oprPrintRef = useRef<HTMLDivElement>(null);
 
   // Fechar menu de datas ao clicar fora
   useEffect(() => {
@@ -1825,7 +1845,47 @@ ${rowsXml}
     ];
   }, [dashboardData]);
 
-  // Buscar registro específico para o Dashboard
+  // Buscar todos os registros do sistema para Manutenção Industrial e One Page Report
+  const fetchAllSystemRecords = async () => {
+    if (!currentUser) return;
+    setIsLoadingAllRecords(true);
+    try {
+      if (useLocalFallback) {
+        let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        if (localRecords.length === 0) {
+          localRecords = generateSampleLocalRecords();
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+        }
+        setAllSystemRecords(localRecords);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('oee_records')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.warn('Erro ao buscar todos os registros do Supabase, usando local:', error);
+        let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+        if (localRecords.length === 0) {
+          localRecords = generateSampleLocalRecords();
+          localStorage.setItem('oee_local_records', JSON.stringify(localRecords));
+        }
+        setAllSystemRecords(localRecords);
+      } else if (data) {
+        setAllSystemRecords(data);
+      }
+    } catch (err) {
+      console.error('Erro na carga geral de registros:', err);
+      let localRecords = safeGetLocalStorage<any[]>('oee_local_records', []);
+      setAllSystemRecords(localRecords);
+    } finally {
+      setIsLoadingAllRecords(false);
+    }
+  };
+
+  // Buscar registro específico para o Dashboard (diário ou consolidado do mês)
   const fetchDashboardRecord = async () => {
     if (!currentUser) return;
     setIsFetchingDashboard(true);
@@ -1874,8 +1934,11 @@ ${rowsXml}
   useEffect(() => {
     if (activeTab === 'dashboard') {
       fetchDashboardRecord();
+      fetchAllSystemRecords();
+    } else if (activeTab === 'maintenance') {
+      fetchAllSystemRecords();
     }
-  }, [dashboardDate, dashboardLine, activeTab]);
+  }, [dashboardDate, dashboardLine, activeTab, dashboardViewMode, dashboardMonth]);
 
   const generateAIAnalysis = async () => {
     setIsAnalyzing(true);
@@ -2058,6 +2121,469 @@ ${rowsXml}
       paretoP
     };
   }, [history, stopCodes]);
+
+  // Registros consolidados para o Dashboard no modo MÊS
+  const dashboardMonthlyData = useMemo(() => {
+    if (dashboardViewMode !== 'mes') return null;
+
+    const [filterYear, filterMonth] = dashboardMonth.split('-').map(Number);
+    const filtered = allSystemRecords.filter(r => {
+      const d = new Date(r.created_at);
+      const matchMonth = d.getFullYear() === filterYear && (d.getMonth() + 1) === filterMonth;
+      const matchLine = dashboardLine === 'Todas' || r.machine_name === dashboardLine;
+      return matchMonth && matchLine;
+    });
+
+    if (filtered.length === 0) return null;
+
+    let sumOee = 0;
+    let sumDisp = 0;
+    let sumPerf = 0;
+    let sumQual = 0;
+    let totalRealH = 0;
+    let totalGarrafasU = 0;
+    let totalMaintenanceMins = 0;
+    let totalProgrammedH = 0;
+    let totalTempoTotalA = 0;
+    let totalTempoOperacaoR = 0;
+    let totalTempoLiquidoT = 0;
+    let totalTempoUtilX = 0;
+    let totalPerdaS = 0;
+    let totalPerdaV = 0;
+    let totalPerdaQ = 0;
+    let totalTeepSum = 0;
+    let validTeepCount = 0;
+
+    // Agrupamento diário do OEE no mês para o gráfico de evolução mensal
+    const dailyMap: { [day: number]: { count: number; oeeSum: number; line: string } } = {};
+
+    filtered.forEach(rec => {
+      sumOee += Number(rec.oee_score) || 0;
+      sumDisp += Number(rec.availability) || 0;
+      sumPerf += Number(rec.performance) || 0;
+      sumQual += Number(rec.quality) || 0;
+
+      const dateObj = new Date(rec.created_at);
+      const day = dateObj.getDate();
+      if (!dailyMap[day]) {
+        dailyMap[day] = { count: 0, oeeSum: 0, line: rec.machine_name };
+      }
+      dailyMap[day].count++;
+      dailyMap[day].oeeSum += Number(rec.oee_score) || 0;
+
+      try {
+        const raw = rec.downtime_data;
+        if (raw) {
+          const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (parsed && !Array.isArray(parsed) && parsed.A !== undefined) {
+            const res = calculateOEEResults(parsed as OEEInputs, stopCodes);
+            totalTempoTotalA += Number(parsed.A) || 0;
+            totalProgrammedH += res.P;
+            totalTempoOperacaoR += res.R;
+            totalTempoLiquidoT += res.T;
+            totalTempoUtilX += res.X;
+            totalRealH += Number(parsed.H) || 0;
+            totalGarrafasU += Number(parsed.U) || 0;
+            totalPerdaS += res.S;
+            totalPerdaV += res.V;
+            totalPerdaQ += res.Q;
+            totalTeepSum += res.teep;
+            validTeepCount++;
+
+            const stops: StopEntry[] = Array.isArray(parsed.stops) ? parsed.stops : [];
+            const mMins = stops
+              .filter(s => [1, 2, 3, 31, 32, 33, 34, 35].includes(Number(s.code)))
+              .reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0);
+            totalMaintenanceMins += mMins;
+          }
+        }
+      } catch (e) {
+        // ignora erro de parse
+      }
+    });
+
+    const count = filtered.length;
+    const avgOee = sumOee / count;
+    const avgDisp = sumDisp / count;
+    const avgPerf = sumPerf / count;
+    const avgQual = sumQual / count;
+    const maintenanceIndex = totalProgrammedH > 0 ? (totalMaintenanceMins / 60 / totalProgrammedH) * 100 : 0;
+    const avgTeep = validTeepCount > 0 ? totalTeepSum / validTeepCount : 0;
+    const productivity = totalProgrammedH > 0 ? (totalRealH / totalProgrammedH) : 0;
+
+    const monthlyTrendChart = Object.entries(dailyMap).map(([dayStr, val]) => ({
+      dia: `Dia ${dayStr.padStart(2, '0')}`,
+      oee: Number((val.oeeSum / val.count).toFixed(1)),
+      diaNum: Number(dayStr)
+    })).sort((a, b) => a.diaNum - b.diaNum);
+
+    const monthlyDecompChart = [
+      { name: 'TEMPO TOTAL (h)', value: Number(totalTempoTotalA.toFixed(1)), color: '#7e22ce' },
+      { name: 'TEMPO PROGRAMADO (h)', value: Number(totalProgrammedH.toFixed(1)), color: '#0ea5e9' },
+      { name: 'TEMPO OPERAÇÃO (h)', value: Number(totalTempoOperacaoR.toFixed(1)), color: '#15803d' },
+      { name: 'TEMPO LÍQUIDO (h)', value: Number(totalTempoLiquidoT.toFixed(1)), color: '#ea580c' },
+      { name: 'TEMPO ÚTIL (h)', value: Number(totalTempoUtilX.toFixed(1)), color: '#0369a1' },
+    ];
+
+    return {
+      count,
+      avgOee,
+      avgDisp,
+      avgPerf,
+      avgQual,
+      maintenanceIndex,
+      avgTeep,
+      productivity,
+      totalRealH,
+      totalGarrafasU,
+      totalPerdaS,
+      totalPerdaV,
+      totalPerdaQ,
+      monthlyTrendChart,
+      monthlyDecompChart
+    };
+  }, [dashboardViewMode, dashboardMonth, dashboardLine, allSystemRecords, stopCodes]);
+
+  // Dados consolidados para a aba Manutenção Industrial (Mensal e Diário)
+  const maintenanceData = useMemo(() => {
+    const [selectedYear, selectedMonth] = maintenanceMonth.split('-').map(Number);
+
+    // 1) Gráfico 1: Índice de Quebra Consolidado por Mês (últimos 6 meses para visão evolutiva)
+    const monthlyBreakdown: { [monthKey: string]: { monthName: string; progH: number; maintMins: number; monthKey: string } } = {};
+    
+    // 2) Gráfico 2: Variação Diária do Índice de Quebra no Mês Selecionado
+    const dailyBreakdown: { [day: number]: { day: number; progH: number; maintMins: number; count: number } } = {};
+
+    // 3) Indicadores agregados do mês selecionado
+    let selectedMonthProgH = 0;
+    let selectedMonthMaintMins = 0;
+    let selectedMonthRecordsCount = 0;
+
+    // Rastreamento dos motivos de quebra mecânica/elétrica
+    const breakdownReasonMap: { [code: number]: { duration: number; count: number; name: string } } = {};
+
+    allSystemRecords.forEach(rec => {
+      const d = new Date(rec.created_at);
+      if (isNaN(d.getTime())) return;
+
+      const recYear = d.getFullYear();
+      const recMonth = d.getMonth() + 1;
+      const recDay = d.getDate();
+      const monthKey = `${recYear}-${String(recMonth).padStart(2, '0')}`;
+
+      // Aplica filtro de linha se selecionado
+      if (maintenanceLine !== 'Todas' && rec.machine_name !== maintenanceLine) return;
+
+      try {
+        const raw = rec.downtime_data;
+        if (!raw) return;
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (!parsed || Array.isArray(parsed) || parsed.A === undefined) return;
+
+        const res = calculateOEEResults(parsed as OEEInputs, stopCodes);
+        const stops: StopEntry[] = Array.isArray(parsed.stops) ? parsed.stops : [];
+
+        // Filtra somente códigos de quebra / manutenção
+        const maintStops = stops.filter(s => [1, 2, 3, 31, 32, 33, 34, 35].includes(Number(s.code)));
+        const maintMinutes = maintStops.reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0);
+
+        // Agrupamento por Mês
+        if (!monthlyBreakdown[monthKey]) {
+          const mDate = new Date(recYear, recMonth - 1, 1);
+          const monthName = mDate.toLocaleDateString('pt-BR', { month: 'short', year: '2-digit' }).toUpperCase();
+          monthlyBreakdown[monthKey] = { monthName, progH: 0, maintMins: 0, monthKey };
+        }
+        monthlyBreakdown[monthKey].progH += res.P;
+        monthlyBreakdown[monthKey].maintMins += maintMinutes;
+
+        // Se pertence ao mês selecionado pelo usuário
+        if (recYear === selectedYear && recMonth === selectedMonth) {
+          selectedMonthProgH += res.P;
+          selectedMonthMaintMins += maintMinutes;
+          selectedMonthRecordsCount++;
+
+          if (!dailyBreakdown[recDay]) {
+            dailyBreakdown[recDay] = { day: recDay, progH: 0, maintMins: 0, count: 0 };
+          }
+          dailyBreakdown[recDay].progH += res.P;
+          dailyBreakdown[recDay].maintMins += maintMinutes;
+          dailyBreakdown[recDay].count++;
+
+          // Detalhar causas de manutenção do mês
+          maintStops.forEach(st => {
+            const cCode = Number(st.code);
+            const dur = Number(st.duration) || 0;
+            const codeConfig = stopCodes.find(c => c.code === cCode);
+            if (!breakdownReasonMap[cCode]) {
+              breakdownReasonMap[cCode] = {
+                duration: 0,
+                count: 0,
+                name: codeConfig ? `${codeConfig.code} - ${codeConfig.description}` : `Código ${cCode}`
+              };
+            }
+            breakdownReasonMap[cCode].duration += dur;
+            breakdownReasonMap[cCode].count += 1;
+          });
+        }
+      } catch (e) {
+        // ignora erro de registro individual
+      }
+    });
+
+    // Formatar Gráfico 1: Meses ordenados cronologicamente
+    const monthlyChartData = Object.values(monthlyBreakdown)
+      .sort((a, b) => a.monthKey.localeCompare(b.monthKey))
+      .map(item => {
+        const indice = item.progH > 0 ? (item.maintMins / 60 / item.progH) * 100 : 0;
+        return {
+          mes: item.monthName,
+          monthKey: item.monthKey,
+          indiceQuebra: Number(indice.toFixed(1)),
+          horasParadas: Number((item.maintMins / 60).toFixed(1)),
+          horasProgramadas: Number(item.progH.toFixed(1))
+        };
+      });
+
+    // Formatar Gráfico 2: Dias do mês selecionado ordenados
+    const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
+    const dailyChartData: { dia: string; diaNum: number; indiceQuebra: number; horasParadas: number }[] = [];
+
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dataDay = dailyBreakdown[day];
+      if (dataDay && dataDay.progH > 0) {
+        const indice = (dataDay.maintMins / 60 / dataDay.progH) * 100;
+        dailyChartData.push({
+          dia: `Dia ${String(day).padStart(2, '0')}`,
+          diaNum: day,
+          indiceQuebra: Number(indice.toFixed(1)),
+          horasParadas: Number((dataDay.maintMins / 60).toFixed(1))
+        });
+      } else if (dataDay && dataDay.maintMins > 0) {
+        dailyChartData.push({
+          dia: `Dia ${String(day).padStart(2, '0')}`,
+          diaNum: day,
+          indiceQuebra: 100,
+          horasParadas: Number((dataDay.maintMins / 60).toFixed(1))
+        });
+      }
+    }
+
+    const overallMonthlyIndex = selectedMonthProgH > 0 ? (selectedMonthMaintMins / 60 / selectedMonthProgH) * 100 : 0;
+    const topBreakdownCauses = Object.values(breakdownReasonMap).sort((a, b) => b.duration - a.duration);
+
+    return {
+      monthlyChartData,
+      dailyChartData,
+      overallMonthlyIndex,
+      totalMaintHours: selectedMonthMaintMins / 60,
+      totalProgHours: selectedMonthProgH,
+      recordsCount: selectedMonthRecordsCount,
+      topBreakdownCauses
+    };
+  }, [allSystemRecords, maintenanceMonth, maintenanceLine, stopCodes]);
+
+  // Dados consolidados para o One Page Report (OPR)
+  const oprData = useMemo(() => {
+    const [selectedYear, selectedMonth] = oprMonth.split('-').map(Number);
+    
+    // Filtrar todos os registros do mês
+    const monthRecords = allSystemRecords.filter(r => {
+      const d = new Date(r.created_at);
+      return d.getFullYear() === selectedYear && (d.getMonth() + 1) === selectedMonth;
+    });
+
+    if (monthRecords.length === 0) return null;
+
+    let totalOee = 0;
+    let totalDisp = 0;
+    let totalPerf = 0;
+    let totalQual = 0;
+    let totalRealProduction = 0;
+    let totalProgrammedHours = 0;
+    let totalMaintenanceMins = 0;
+    let totalAllStopsDurationMins = 0;
+
+    // Agrupamento por Linha
+    const lineMap: { 
+      [line: string]: { 
+        count: number; 
+        oeeSum: number; 
+        dispSum: number; 
+        perfSum: number; 
+        qualSum: number; 
+        realProd: number; 
+        progH: number; 
+        maintMins: number; 
+        stopsMins: number; 
+      } 
+    } = {};
+
+    PRODUCTION_LINES.forEach(l => {
+      lineMap[l] = {
+        count: 0,
+        oeeSum: 0,
+        dispSum: 0,
+        perfSum: 0,
+        qualSum: 0,
+        realProd: 0,
+        progH: 0,
+        maintMins: 0,
+        stopsMins: 0
+      };
+    });
+
+    // Agrupamento diário para o Gráfico OEE Global do mês
+    const dailyOeeMap: { [day: number]: { sum: number; count: number } } = {};
+
+    monthRecords.forEach(rec => {
+      const oeeScore = Number(rec.oee_score) || 0;
+      totalOee += oeeScore;
+      totalDisp += Number(rec.availability) || 0;
+      totalPerf += Number(rec.performance) || 0;
+      totalQual += Number(rec.quality) || 0;
+
+      const d = new Date(rec.created_at);
+      const day = d.getDate();
+      if (!dailyOeeMap[day]) {
+        dailyOeeMap[day] = { sum: 0, count: 0 };
+      }
+      dailyOeeMap[day].sum += oeeScore;
+      dailyOeeMap[day].count += 1;
+
+      const lName = rec.machine_name;
+      if (!lineMap[lName]) {
+        lineMap[lName] = {
+          count: 0, oeeSum: 0, dispSum: 0, perfSum: 0, qualSum: 0, realProd: 0, progH: 0, maintMins: 0, stopsMins: 0
+        };
+      }
+
+      lineMap[lName].count++;
+      lineMap[lName].oeeSum += oeeScore;
+      lineMap[lName].dispSum += Number(rec.availability) || 0;
+      lineMap[lName].perfSum += Number(rec.performance) || 0;
+      lineMap[lName].qualSum += Number(rec.quality) || 0;
+
+      try {
+        const raw = rec.downtime_data;
+        if (raw) {
+          const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (parsed && !Array.isArray(parsed) && parsed.A !== undefined) {
+            const res = calculateOEEResults(parsed as OEEInputs, stopCodes);
+            const stops: StopEntry[] = Array.isArray(parsed.stops) ? parsed.stops : [];
+
+            const hProd = Number(parsed.H) || 0;
+            totalRealProduction += hProd;
+            totalProgrammedHours += res.P;
+            lineMap[lName].realProd += hProd;
+            lineMap[lName].progH += res.P;
+
+            const mMins = stops
+              .filter(s => [1, 2, 3, 31, 32, 33, 34, 35].includes(Number(s.code)))
+              .reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0);
+            totalMaintenanceMins += mMins;
+            lineMap[lName].maintMins += mMins;
+
+            const allMins = stops.reduce((acc, curr) => acc + (Number(curr.duration) || 0), 0);
+            totalAllStopsDurationMins += allMins;
+            lineMap[lName].stopsMins += allMins;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    });
+
+    const totalCount = monthRecords.length;
+    const globalOee = totalOee / totalCount;
+    const globalDisp = totalDisp / totalCount;
+    const globalPerf = totalPerf / totalCount;
+    const globalQual = totalQual / totalCount;
+    const globalMaintenanceIndex = totalProgrammedHours > 0 ? (totalMaintenanceMins / 60 / totalProgrammedHours) * 100 : 0;
+    const globalProductivity = totalProgrammedHours > 0 ? (totalRealProduction / totalProgrammedHours) : 0;
+    const totalStopsHours = totalAllStopsDurationMins / 60;
+
+    // Gráfico do mês consolidado diário (Todas as Linhas)
+    const monthlyDailyChart = Object.entries(dailyOeeMap).map(([dayStr, val]) => ({
+      dia: `Dia ${dayStr.padStart(2, '0')}`,
+      diaNum: Number(dayStr),
+      oee: Number((val.sum / val.count).toFixed(1))
+    })).sort((a, b) => a.diaNum - b.diaNum);
+
+    // Linhas com indicadores e dados individuais
+    const linesData = PRODUCTION_LINES.map(lineName => {
+      const item = lineMap[lineName];
+      const hasRecords = item && item.count > 0;
+      const oee = hasRecords ? item.oeeSum / item.count : 0;
+      const disp = hasRecords ? item.dispSum / item.count : 0;
+      const perf = hasRecords ? item.perfSum / item.count : 0;
+      const qual = hasRecords ? item.qualSum / item.count : 0;
+      const mIdx = item.progH > 0 ? (item.maintMins / 60 / item.progH) * 100 : 0;
+      const prod = item.progH > 0 ? item.realProd / item.progH : 0;
+      const stopsH = item.stopsMins / 60;
+
+      return {
+        lineName,
+        hasRecords,
+        count: item.count,
+        oee: Number(oee.toFixed(1)),
+        disp: Number(disp.toFixed(1)),
+        perf: Number(perf.toFixed(1)),
+        qual: Number(qual.toFixed(1)),
+        maintenanceIndex: Number(mIdx.toFixed(1)),
+        productivity: Number(prod.toFixed(1)),
+        totalStopsHours: Number(stopsH.toFixed(1))
+      };
+    });
+
+    return {
+      monthKey: oprMonth,
+      monthFormatted: new Date(selectedYear, selectedMonth - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase(),
+      totalRecords: totalCount,
+      globalOee: Number(globalOee.toFixed(1)),
+      globalDisp: Number(globalDisp.toFixed(1)),
+      globalPerf: Number(globalPerf.toFixed(1)),
+      globalQual: Number(globalQual.toFixed(1)),
+      globalMaintenanceIndex: Number(globalMaintenanceIndex.toFixed(1)),
+      globalProductivity: Number(globalProductivity.toFixed(1)),
+      totalStopsHours: Number(totalStopsHours.toFixed(1)),
+      monthlyDailyChart,
+      linesData
+    };
+  }, [allSystemRecords, oprMonth, stopCodes]);
+
+  // Função para Download do One Page Report em PDF formato Paisagem (Landscape)
+  const downloadOnePageReportPdf = async () => {
+    if (!oprPrintRef.current) return;
+    setIsExportingPdf(true);
+    try {
+      const element = oprPrintRef.current;
+      
+      const canvas = await html2canvas(element, {
+        scale: 2, // Alta resolução
+        useCORS: true,
+        backgroundColor: '#09090b',
+        logging: false
+      });
+
+      const imgData = canvas.toDataURL('image/png');
+      // A4 Landscape: 297mm x 210mm
+      const pdf = new jsPDF({
+        orientation: 'landscape',
+        unit: 'mm',
+        format: 'a4'
+      });
+
+      const pdfWidth = 297;
+      const pdfHeight = 210;
+      pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight, undefined, 'FAST');
+      pdf.save(`ONE_PAGE_REPORT_OEE_${oprMonth}.pdf`);
+    } catch (err) {
+      console.error('Erro ao gerar PDF do One Page Report:', err);
+      alert('Erro ao gerar PDF do relatório. Tente novamente.');
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
 
   const currentParetoData = useMemo(() => {
     const stopsMap: { [key: number]: number } = {};
@@ -2601,6 +3127,13 @@ ${rowsXml}
           >
             <TrendingUp size={20} />
             <span className="hidden md:inline">Evolução</span>
+          </button>
+          <button 
+            onClick={() => { setActiveTab('maintenance'); setShowAdminPanel(false); }}
+            className={`flex-1 md:flex-none flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'maintenance' && !showAdminPanel ? 'bg-amber-600 text-white font-semibold shadow-lg shadow-amber-600/20' : 'text-slate-400 hover:bg-white/5'}`}
+          >
+            <Wrench size={20} />
+            <span className="hidden md:inline">Manutenção Industrial</span>
           </button>
           <button 
             onClick={() => { setActiveTab('inputs'); setShowAdminPanel(false); }}
@@ -3208,9 +3741,55 @@ ${rowsXml}
               exit={{ opacity: 0, y: -20 }}
               className="max-w-6xl mx-auto space-y-8"
             >
-              {/* Dashboard Filters */}
+              {/* Dashboard Filters & Controls */}
               <div className="bg-zinc-900/50 backdrop-blur-xl p-6 rounded-3xl border border-white/10 shadow-2xl">
-                <div className="flex flex-col md:flex-row items-center gap-6">
+                <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-6 pb-6 border-b border-white/10">
+                  <div>
+                    <h2 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+                      <Activity size={20} className="text-blue-400" />
+                      Filtros do Dashboard
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Alterne entre visão <strong>Diária</strong> (apontamento detalhado) e <strong>Mensal</strong> (consolidado com evolução no mês).
+                    </p>
+                  </div>
+
+                  {/* Botão ONE PAGE REPORT & Seletor de Modo */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setShowOnePageReport(true)}
+                      className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/20 border border-emerald-400/30 transition-all cursor-pointer"
+                      title="Gerar Relatório Gerencial ONE PAGE REPORT em 1 página no formato Paisagem"
+                    >
+                      <FileText size={16} />
+                      <span>One Page Report (OPR)</span>
+                      <span className="text-[9px] bg-black/30 px-1.5 py-0.5 rounded-md font-mono uppercase">PDF</span>
+                    </button>
+
+                    {/* Switcher DIA / MÊS */}
+                    <div className="flex bg-zinc-800/80 p-1 rounded-2xl border border-white/10">
+                      <button
+                        type="button"
+                        onClick={() => setDashboardViewMode('dia')}
+                        className={`px-4 py-1.5 rounded-xl text-xs font-bold transition-all ${dashboardViewMode === 'dia' ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30' : 'text-slate-400 hover:text-white'}`}
+                      >
+                        Visão Diária
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDashboardViewMode('mes')}
+                        className={`px-4 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${dashboardViewMode === 'mes' ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30' : 'text-slate-400 hover:text-white'}`}
+                      >
+                        <Calendar size={13} />
+                        Visão Mês
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col md:flex-row items-center gap-6 mt-6">
+                  {/* Filtro Linha */}
                   <div className="flex-1 w-full">
                     <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Linha de Produção</label>
                     <div className="relative group">
@@ -3222,40 +3801,279 @@ ${rowsXml}
                         onChange={(e) => setDashboardLine(e.target.value)}
                         className="w-full bg-zinc-800/50 border border-white/10 text-white pl-11 pr-4 py-3 rounded-2xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500/50 transition-all appearance-none cursor-pointer hover:bg-zinc-800"
                       >
+                        {dashboardViewMode === 'mes' && <option value="Todas">Todas as Linhas (Geral)</option>}
                         {PRODUCTION_LINES.map(line => (
                           <option key={line} value={line}>{line}</option>
                         ))}
                       </select>
                     </div>
                   </div>
+
+                  {/* Filtro MÊS */}
                   <div className="flex-1 w-full">
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Data de Referência</label>
+                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Mês de Referência</label>
                     <div className="relative group">
                       <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-500 group-focus-within:text-blue-400 transition-colors">
                         <Calendar size={18} />
                       </div>
                       <input 
-                        type="date"
-                        value={dashboardDate}
-                        onChange={(e) => setDashboardDate(e.target.value)}
+                        type="month"
+                        value={dashboardMonth}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setDashboardMonth(val);
+                          // Atualiza também a data de referência para coincidir com o mesmo mês
+                          if (val) {
+                            const [y, m] = val.split('-');
+                            setDashboardDate(`${y}-${m}-01`);
+                          }
+                        }}
                         className="w-full bg-zinc-800/50 border border-white/10 text-white pl-11 pr-4 py-3 rounded-2xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500/50 transition-all cursor-pointer hover:bg-zinc-800"
                       />
                     </div>
                   </div>
+
+                  {/* Filtro DIA (ativo no modo diário) */}
+                  {dashboardViewMode === 'dia' && (
+                    <div className="flex-1 w-full">
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 ml-1">Dia Específico</label>
+                      <div className="relative group">
+                        <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-500 group-focus-within:text-blue-400 transition-colors">
+                          <Calendar size={18} />
+                        </div>
+                        <input 
+                          type="date"
+                          value={dashboardDate}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setDashboardDate(val);
+                            if (val) setDashboardMonth(val.slice(0, 7));
+                          }}
+                          className="w-full bg-zinc-800/50 border border-white/10 text-white pl-11 pr-4 py-3 rounded-2xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500/50 transition-all cursor-pointer hover:bg-zinc-800"
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   <div className="md:pt-6">
                     <button 
-                      onClick={fetchDashboardRecord}
-                      disabled={isFetchingDashboard}
-                      className="w-full md:w-auto bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-2xl font-bold transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2 disabled:opacity-50"
+                      onClick={() => {
+                        fetchDashboardRecord();
+                        fetchAllSystemRecords();
+                      }}
+                      disabled={isFetchingDashboard || isLoadingAllRecords}
+                      className="w-full md:w-auto bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-2xl font-bold transition-all shadow-lg shadow-blue-600/20 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
                     >
-                      {isFetchingDashboard ? <RefreshCw size={18} className="animate-spin" /> : <Search size={18} />}
-                      {isFetchingDashboard ? 'Buscando...' : 'Atualizar'}
+                      {isFetchingDashboard || isLoadingAllRecords ? <RefreshCw size={18} className="animate-spin" /> : <Search size={18} />}
+                      {isFetchingDashboard || isLoadingAllRecords ? 'Buscando...' : 'Atualizar'}
                     </button>
                   </div>
                 </div>
               </div>
 
-              {dashboardRecord ? (
+              {/* RENDERIZAÇÃO: MODO MÊS OU MODO DIÁRIO */}
+              {dashboardViewMode === 'mes' ? (
+                dashboardMonthlyData ? (
+                  <>
+                    <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 text-[10px] font-bold rounded uppercase tracking-wider border border-blue-500/20">
+                            {dashboardLine}
+                          </span>
+                          <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 text-[10px] font-bold rounded uppercase tracking-wider border border-emerald-500/20">
+                            Visão Mensal Consolidada
+                          </span>
+                          <span className="px-2 py-0.5 bg-purple-500/20 text-purple-300 text-[10px] font-bold rounded uppercase tracking-wider border border-purple-500/20">
+                            {dashboardMonthlyData.count} apontamento(s)
+                          </span>
+                        </div>
+                        <h2 className="text-3xl font-bold tracking-tight text-white">Desempenho OEE no Mês</h2>
+                        <p className="text-slate-400 mt-1">
+                          Consolidação de {new Date(parseInt(dashboardMonth.split('-')[0]), parseInt(dashboardMonth.split('-')[1]) - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase()}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <button 
+                          onClick={() => setShowOnePageReport(true)}
+                          className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-lg shadow-emerald-600/20"
+                        >
+                          <FileText size={14} />
+                          Gerar One Page Report
+                        </button>
+                      </div>
+                    </header>
+
+                    {/* KPI Cards Mensais */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                      <KPICard 
+                        title="Disponibilidade Média" 
+                        value={dashboardMonthlyData.avgDisp} 
+                        icon={<Clock className="text-blue-400" />} 
+                        color="blue"
+                        description="Média consolidada de Disponibilidade no mês"
+                      />
+                      <KPICard 
+                        title="Performance Média" 
+                        value={dashboardMonthlyData.avgPerf} 
+                        icon={<TrendingUp className="text-orange-400" />} 
+                        color="orange"
+                        description="Média consolidada de Performance no mês"
+                      />
+                      <KPICard 
+                        title="Qualidade Média" 
+                        value={dashboardMonthlyData.avgQual} 
+                        icon={<CheckCircle2 className="text-emerald-400" />} 
+                        color="emerald"
+                        description="Média consolidada de Qualidade no mês"
+                      />
+                      <KPICard 
+                        title="OEE Global Médio" 
+                        value={dashboardMonthlyData.avgOee} 
+                        icon={<Gauge className="text-indigo-400" />} 
+                        color="indigo"
+                        isMain
+                        isOEE
+                        description="Eficiência Global Consolidada no Mês"
+                      />
+                    </div>
+
+                    {/* Gráfico 1: Evolução Diária do OEE no Mês */}
+                    <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                        <div>
+                          <h3 className="font-bold text-lg flex items-center gap-2 text-white">
+                            <BarChart3 size={20} className="text-indigo-400" />
+                            Gráfico de Evolução do OEE no Mês ({dashboardMonth})
+                          </h3>
+                          <p className="text-xs text-slate-400 mt-1">
+                            Acompanhamento diário do OEE consolidado para a seleção: <strong>{dashboardLine}</strong>
+                          </p>
+                        </div>
+                        {/* Faixas OEE Legend */}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {OEE_COLOR_THRESHOLDS.map(item => (
+                            <div 
+                              key={item.rangeText}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold border tracking-tight"
+                              style={{
+                                backgroundColor: `${item.hex}18`,
+                                borderColor: `${item.hex}35`,
+                                color: item.hex
+                              }}
+                            >
+                              <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: item.hex }} />
+                              <span>{item.rangeText}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="h-80 w-full">
+                        {dashboardMonthlyData.monthlyTrendChart.length > 0 ? (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={dashboardMonthlyData.monthlyTrendChart} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                              <XAxis dataKey="dia" stroke="#64748b" tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                              <YAxis domain={[0, 100]} stroke="#64748b" tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                              <Tooltip 
+                                content={({ active, payload }) => {
+                                  if (active && payload && payload.length) {
+                                    const val = Number(payload[0].value) || 0;
+                                    const col = getOEEColorInfo(val);
+                                    return (
+                                      <div className="bg-zinc-900 border border-white/10 p-3 rounded-xl shadow-xl">
+                                        <p className="text-xs text-slate-400 font-bold mb-1">{payload[0].payload.dia}</p>
+                                        <p className="text-sm font-black" style={{ color: col.hex }}>
+                                          OEE: {val.toFixed(1)}% ({col.rangeText})
+                                        </p>
+                                      </div>
+                                    );
+                                  }
+                                  return null;
+                                }}
+                              />
+                              <Bar dataKey="oee" radius={[6, 6, 0, 0]}>
+                                {dashboardMonthlyData.monthlyTrendChart.map((entry, index) => {
+                                  const col = getOEEColorHex(entry.oee);
+                                  return <Cell key={`cell-${index}`} fill={col} />;
+                                })}
+                                <LabelList 
+                                  dataKey="oee" 
+                                  position="top" 
+                                  formatter={(v: number) => `${v.toFixed(0)}%`} 
+                                  style={{ fill: '#cbd5e1', fontSize: 11, fontWeight: 700 }} 
+                                />
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div className="h-full flex items-center justify-center text-slate-500 text-xs">
+                            Sem lançamentos diários suficientes no mês selecionado.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Stats Secundários Mensais */}
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
+                        <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Volume & Produção do Mês</h3>
+                        <div className="space-y-4">
+                          <StatRow label="Produção Real Total" value={formatNumber(dashboardMonthlyData.totalRealH)} unit="fardos" highlight />
+                          <StatRow label="Perda por Qualidade (U)" value={formatNumber(dashboardMonthlyData.totalGarrafasU)} unit="garrafas" color="text-red-400" />
+                          <StatRow label="Produtividade Média" value={dashboardMonthlyData.productivity.toFixed(1)} unit="fardos/h" />
+                        </div>
+                      </div>
+
+                      <div className="bg-zinc-900 rounded-3xl p-6 border border-white/10 shadow-sm">
+                        <h3 className="font-bold text-[10px] text-slate-500 uppercase tracking-widest mb-4">Perdas Acumuladas no Mês</h3>
+                        <div className="space-y-4">
+                          <StatRow label="Redução de Velocidade (S)" value={dashboardMonthlyData.totalPerdaS.toFixed(1)} unit="h" color="text-orange-400" />
+                          <StatRow label="Perda por Qualidade (V)" value={dashboardMonthlyData.totalPerdaV.toFixed(1)} unit="h" color="text-red-400" />
+                          <StatRow label="Paradas Não Programadas (Q)" value={dashboardMonthlyData.totalPerdaQ.toFixed(1)} unit="h" color="text-red-400" />
+                        </div>
+                      </div>
+
+                      <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm flex flex-col justify-between">
+                        <div>
+                          <div className="flex items-center gap-3 mb-4">
+                            <div className="p-3 bg-red-500/10 text-red-400 rounded-2xl border border-red-500/20">
+                              <Cpu size={22} />
+                            </div>
+                            <div>
+                              <h3 className="font-bold text-sm text-white uppercase tracking-wider">Índice de Quebra Médio</h3>
+                              <p className="text-[10px] text-slate-400">Total Paradas Manutenção / Tempo Programado</p>
+                            </div>
+                          </div>
+                          <p className="text-5xl font-black text-white">
+                            {dashboardMonthlyData.maintenanceIndex.toFixed(1)}%
+                          </p>
+                          <div className={`mt-3 inline-flex items-center gap-2 text-xs font-bold px-3 py-1 rounded-xl border ${dashboardMonthlyData.maintenanceIndex < 5 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
+                            {dashboardMonthlyData.maintenanceIndex < 5 ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+                            <span>Meta: &lt; 5.0% ({dashboardMonthlyData.maintenanceIndex < 5 ? 'Sob Controle' : 'Acima da Meta'})</span>
+                          </div>
+                        </div>
+
+                        <div className="mt-6 pt-6 border-t border-white/10 flex justify-between items-center text-xs text-slate-400">
+                          <span>TEEP Médio do Mês:</span>
+                          <span className="font-bold text-indigo-400 text-sm">{dashboardMonthlyData.avgTeep.toFixed(1)}%</span>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-20 bg-zinc-900/30 rounded-3xl border border-dashed border-white/10">
+                    <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-6">
+                      <Search size={32} className="text-slate-500" />
+                    </div>
+                    <h3 className="text-xl font-bold text-white mb-2">Nenhum registro encontrado no mês</h3>
+                    <p className="text-slate-400 max-w-md text-center text-xs">
+                      Não encontramos lançamentos para a <strong>{dashboardLine}</strong> no mês <strong>{dashboardMonth}</strong>.
+                    </p>
+                  </div>
+                )
+              ) : dashboardRecord ? (
                 <>
                   <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                     <div>
@@ -3273,7 +4091,7 @@ ${rowsXml}
                     <div className="flex items-center gap-4">
                       <button 
                         onClick={() => handleDownloadReport(dashboardData?.inputs, dashboardData?.results)}
-                        className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10"
+                        className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10 cursor-pointer"
                       >
                         <Download size={14} />
                         Download Relatório
@@ -3281,7 +4099,7 @@ ${rowsXml}
                       <button 
                         onClick={generateAIAnalysis}
                         disabled={isAnalyzing}
-                        className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-600/20"
+                        className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-600/20 cursor-pointer"
                       >
                         {isAnalyzing ? <RefreshCw size={14} className="animate-spin" /> : <Sparkles size={14} />}
                         {isAnalyzing ? 'Analisando...' : 'Gerar Insight IA'}
@@ -4505,14 +5323,603 @@ ${rowsXml}
                 </button>
                 <button 
                   onClick={() => setActiveTab('dashboard')}
-                  className="bg-blue-600 text-white px-10 py-4 rounded-2xl font-bold shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-all flex items-center justify-center gap-2 group"
+                  className="bg-blue-600 text-white px-10 py-4 rounded-2xl font-bold shadow-lg shadow-blue-500/20 hover:bg-blue-700 transition-all flex items-center justify-center gap-2 group cursor-pointer"
                 >
                   Calcular e Ver Dashboard
                   <ChevronRight size={20} className="group-hover:translate-x-1 transition-transform" />
                 </button>
               </div>
             </motion.div>
+          ) : activeTab === 'maintenance' ? (
+            <motion.div
+              key="maintenance"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="max-w-6xl mx-auto space-y-8"
+            >
+              {/* Header Manutenção Industrial */}
+              <header className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className="px-2.5 py-0.5 bg-amber-500/20 text-amber-400 text-[10px] font-black rounded-lg uppercase tracking-wider border border-amber-500/30 flex items-center gap-1.5">
+                      <Wrench size={12} />
+                      PCM & Manutenção Industrial
+                    </span>
+                    <span className="px-2.5 py-0.5 bg-white/5 text-slate-400 text-[10px] font-bold rounded-lg border border-white/5">
+                      Códigos 1-3, 31-35
+                    </span>
+                  </div>
+                  <h2 className="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
+                    Painel de Manutenção Industrial
+                  </h2>
+                  <p className="text-slate-400 mt-1">
+                    Gestão e controle analítico de paradas por quebra mecânica, elétrica e intervenções de manutenção.
+                  </p>
+                </div>
+
+                {/* Filtros da Manutenção */}
+                <div className="flex flex-wrap items-center gap-3 bg-zinc-900/60 p-3 rounded-2xl border border-white/10 backdrop-blur-md">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Mês de Análise</span>
+                    <input 
+                      type="month"
+                      value={maintenanceMonth}
+                      onChange={(e) => setMaintenanceMonth(e.target.value)}
+                      className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500/50 cursor-pointer"
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest ml-1">Linha</span>
+                    <select
+                      value={maintenanceLine}
+                      onChange={(e) => setMaintenanceLine(e.target.value)}
+                      className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-500/50 cursor-pointer min-w-[130px]"
+                    >
+                      <option value="Todas">Todas as Linhas</option>
+                      {PRODUCTION_LINES.map(line => (
+                        <option key={line} value={line}>{line}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <button
+                    onClick={fetchAllSystemRecords}
+                    disabled={isLoadingAllRecords}
+                    className="flex items-center gap-1.5 bg-white/5 hover:bg-white/10 text-white px-3 py-2 rounded-xl text-xs font-bold transition-all border border-white/10 mt-5 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={isLoadingAllRecords ? 'animate-spin' : ''} />
+                    <span>Atualizar</span>
+                  </button>
+                </div>
+              </header>
+
+              {/* Cards de KPIs de Manutenção */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+                <div className="bg-zinc-900 p-6 rounded-3xl border border-white/10 shadow-sm flex flex-col justify-between">
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="p-3 rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                      <Cpu size={22} />
+                    </div>
+                    <span className="text-3xl font-black tracking-tighter text-white">
+                      {maintenanceData.overallMonthlyIndex.toFixed(1)}%
+                    </span>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Índice de Quebra Médio</h4>
+                    <p className="text-[10px] text-slate-500 mt-1 leading-tight font-medium">
+                      Meta &lt; 5.0% • {maintenanceData.overallMonthlyIndex < 5 ? 'Status Sob Controle' : 'Requer Atenção'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-900 p-6 rounded-3xl border border-white/10 shadow-sm flex flex-col justify-between">
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="p-3 rounded-2xl bg-red-500/10 text-red-400 border border-red-500/20">
+                      <Clock size={22} />
+                    </div>
+                    <span className="text-3xl font-black tracking-tighter text-red-400">
+                      {maintenanceData.totalMaintHours.toFixed(1)}h
+                    </span>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Horas Paradas (Manutenção)</h4>
+                    <p className="text-[10px] text-slate-500 mt-1 leading-tight font-medium">
+                      Tempo total perdido por quebras mecânicas/elétricas
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-900 p-6 rounded-3xl border border-white/10 shadow-sm flex flex-col justify-between">
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="p-3 rounded-2xl bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                      <Calendar size={22} />
+                    </div>
+                    <span className="text-3xl font-black tracking-tighter text-blue-400">
+                      {maintenanceData.totalProgHours.toFixed(1)}h
+                    </span>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Tempo Programado (P)</h4>
+                    <p className="text-[10px] text-slate-500 mt-1 leading-tight font-medium">
+                      Base horária operacional do mês selecionado
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-900 p-6 rounded-3xl border border-white/10 shadow-sm flex flex-col justify-between">
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="p-3 rounded-2xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                      <Layers size={22} />
+                    </div>
+                    <span className="text-3xl font-black tracking-tighter text-emerald-400">
+                      {maintenanceData.recordsCount}
+                    </span>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Turnos / Lançamentos</h4>
+                    <p className="text-[10px] text-slate-500 mt-1 leading-tight font-medium">
+                      Apontamentos contabilizados no período
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* GRÁFICO 1: RESULTADOS CONSOLIDADOS POR MÊS DO ÍNDICE DE QUEBRA */}
+              <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="w-2 h-2 rounded-full bg-amber-500" />
+                      <h3 className="font-bold text-lg text-white">
+                        1. Índice de Quebra Consolidado por Mês (%)
+                      </h3>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Visão macro da evolução mensal do indicador de quebra de equipamentos (Linha: <strong>{maintenanceLine}</strong>). Linha pontilhada vermelha representa a meta de 5.0%.
+                    </p>
+                  </div>
+
+                  <span className="text-[10px] font-bold text-amber-400 bg-amber-500/10 px-3 py-1 rounded-lg border border-amber-500/20 self-start sm:self-auto">
+                    Meta Industrial: &lt; 5.0%
+                  </span>
+                </div>
+
+                <div className="h-80 w-full">
+                  {maintenanceData.monthlyChartData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={maintenanceData.monthlyChartData} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                        <XAxis dataKey="mes" stroke="#64748b" tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                        <YAxis domain={[0, 'auto']} stroke="#64748b" tick={{ fontSize: 11, fill: '#94a3b8' }} unit="%" />
+                        <Tooltip 
+                          content={({ active, payload }) => {
+                            if (active && payload && payload.length) {
+                              const item = payload[0].payload;
+                              return (
+                                <div className="bg-zinc-900 border border-white/10 p-3.5 rounded-2xl shadow-2xl">
+                                  <p className="text-xs text-slate-400 font-bold mb-1 uppercase">{item.mes}</p>
+                                  <p className="text-sm font-black text-amber-400">
+                                    Índice de Quebra: {item.indiceQuebra.toFixed(1)}%
+                                  </p>
+                                  <p className="text-[11px] text-slate-300 mt-1">
+                                    Horas Paradas: {item.horasParadas}h / Prog: {item.horasProgramadas}h
+                                  </p>
+                                </div>
+                              );
+                            }
+                            return null;
+                          }}
+                        />
+                        <Bar dataKey="indiceQuebra" radius={[6, 6, 0, 0]}>
+                          {maintenanceData.monthlyChartData.map((entry, index) => (
+                            <Cell 
+                              key={`cell-${index}`} 
+                              fill={entry.indiceQuebra < 5 ? '#3CB043' : entry.indiceQuebra <= 10 ? '#eab308' : '#ef4444'} 
+                            />
+                          ))}
+                          <LabelList 
+                            dataKey="indiceQuebra" 
+                            position="top" 
+                            formatter={(v: number) => `${v.toFixed(1)}%`} 
+                            style={{ fill: '#cbd5e1', fontSize: 11, fontWeight: 700 }} 
+                          />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-slate-500 text-xs italic">
+                      Nenhum histórico de manutenção disponível no banco de dados.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* GRÁFICO 2: VARIAÇÃO DIÁRIA DO ÍNDICE DE QUEBRA NO MÊS ESCOLHIDO */}
+              <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="w-2 h-2 rounded-full bg-red-500" />
+                      <h3 className="font-bold text-lg text-white">
+                        2. Variação Diária do Índice de Quebra no Mês ({maintenanceMonth})
+                      </h3>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Dispersão diária do índice de quebras para identificar picos de falhas mecânicas e dias críticos.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs text-slate-400">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#3CB043]" />
+                    <span>&lt; 5%</span>
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#eab308] ml-2" />
+                    <span>5 a 10%</span>
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#ef4444] ml-2" />
+                    <span>&gt; 10%</span>
+                  </div>
+                </div>
+
+                <div className="h-80 w-full">
+                  {maintenanceData.dailyChartData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={maintenanceData.dailyChartData} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                        <XAxis dataKey="dia" stroke="#64748b" tick={{ fontSize: 10, fill: '#94a3b8' }} />
+                        <YAxis domain={[0, 'auto']} stroke="#64748b" tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" />
+                        <Tooltip 
+                          content={({ active, payload }) => {
+                            if (active && payload && payload.length) {
+                              const item = payload[0].payload;
+                              return (
+                                <div className="bg-zinc-900 border border-white/10 p-3.5 rounded-2xl shadow-2xl">
+                                  <p className="text-xs text-slate-400 font-bold mb-1">{item.dia}</p>
+                                  <p className="text-sm font-black text-amber-400">
+                                    Índice de Quebra: {item.indiceQuebra.toFixed(1)}%
+                                  </p>
+                                  <p className="text-[11px] text-slate-300 mt-1">
+                                    Horas Paradas no Dia: {item.horasParadas}h
+                                  </p>
+                                </div>
+                              );
+                            }
+                            return null;
+                          }}
+                        />
+                        <Bar dataKey="indiceQuebra" radius={[6, 6, 0, 0]}>
+                          {maintenanceData.dailyChartData.map((entry, index) => (
+                            <Cell 
+                              key={`cell-daily-${index}`} 
+                              fill={entry.indiceQuebra < 5 ? '#3CB043' : entry.indiceQuebra <= 10 ? '#eab308' : '#ef4444'} 
+                            />
+                          ))}
+                          <LabelList 
+                            dataKey="indiceQuebra" 
+                            position="top" 
+                            formatter={(v: number) => `${v.toFixed(0)}%`} 
+                            style={{ fill: '#cbd5e1', fontSize: 10, fontWeight: 700 }} 
+                          />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full flex items-center justify-center text-slate-500 text-xs italic">
+                      Nenhum apontamento com paradas de manutenção registrado no mês {maintenanceMonth}.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Detalhamento das Causas de Parada por Manutenção no Mês */}
+              <div className="bg-zinc-900 rounded-3xl p-8 border border-white/10 shadow-sm">
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <h3 className="font-bold text-base text-white flex items-center gap-2">
+                      <Wrench size={18} className="text-amber-400" />
+                      Ranking de Causas de Manutenção no Mês ({maintenanceMonth})
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Equipamentos com maior tempo acumulado de intervenção de manutenção.
+                    </p>
+                  </div>
+                  <span className="text-xs text-slate-400 font-bold">
+                    {maintenanceData.topBreakdownCauses.length} causa(s) identificada(s)
+                  </span>
+                </div>
+
+                {maintenanceData.topBreakdownCauses.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {maintenanceData.topBreakdownCauses.map((cause, idx) => (
+                      <div key={idx} className="p-4 bg-white/5 rounded-2xl border border-white/5 flex items-center justify-between">
+                        <div>
+                          <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wider block">#{idx + 1} Equipamento</span>
+                          <span className="text-xs font-bold text-white mt-0.5 block">{cause.name}</span>
+                          <span className="text-[10px] text-slate-500 mt-1 block">{cause.count} ocorrência(s)</span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-base font-black text-amber-400">{(cause.duration / 60).toFixed(1)}h</span>
+                          <span className="text-[10px] text-slate-500 block">({cause.duration} min)</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500 italic text-center py-6">
+                    Sem paradas de manutenção registradas para os filtros selecionados.
+                  </p>
+                )}
+              </div>
+            </motion.div>
           ) : null}
+        </AnimatePresence>
+
+        {/* MODAL ONE PAGE REPORT (OPR) NO FORMATO PAISAGEM */}
+        <AnimatePresence>
+          {showOnePageReport && (
+            <div className="fixed inset-0 z-[120] flex items-center justify-center p-2 sm:p-4 bg-black/85 backdrop-blur-md overflow-y-auto">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-zinc-950 w-full max-w-7xl max-h-[96vh] flex flex-col rounded-3xl border border-white/15 shadow-2xl overflow-hidden"
+              >
+                {/* OPR Modal Toolbar */}
+                <div className="p-4 sm:px-8 sm:py-4 bg-zinc-900 border-b border-white/10 flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 bg-emerald-500/20 text-emerald-400 rounded-xl border border-emerald-500/30">
+                      <FileText size={20} />
+                    </div>
+                    <div>
+                      <h2 className="text-base font-bold text-white flex items-center gap-2">
+                        ONE PAGE REPORT (OPR) - RELATÓRIO MENSAL GERENCIAL
+                      </h2>
+                      <p className="text-xs text-slate-400">Formato Paisagem (Landscape A4) • 1 Página Consolidada</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Mês:</span>
+                      <input 
+                        type="month"
+                        value={oprMonth}
+                        onChange={(e) => setOprMonth(e.target.value)}
+                        className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 cursor-pointer"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={downloadOnePageReportPdf}
+                      disabled={isExportingPdf || !oprData}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-lg shadow-emerald-600/30 disabled:opacity-50 cursor-pointer"
+                    >
+                      {isExportingPdf ? (
+                        <RefreshCw size={14} className="animate-spin text-white" />
+                      ) : (
+                        <Download size={14} className="text-white" />
+                      )}
+                      <span>{isExportingPdf ? 'Gerando PDF...' : 'Download PDF (Paisagem)'}</span>
+                    </button>
+
+                    <button 
+                      onClick={() => setShowOnePageReport(false)}
+                      className="p-2 hover:bg-white/10 rounded-xl text-slate-400 hover:text-white transition-colors"
+                      title="Fechar"
+                    >
+                      <X size={20} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* OPR Printable Area (A4 Landscape aspect ratio) */}
+                <div className="p-4 sm:p-6 overflow-y-auto flex-1 bg-zinc-950 flex justify-center">
+                  {oprData ? (
+                    <div 
+                      ref={oprPrintRef}
+                      className="w-full max-w-[1200px] bg-zinc-900 border border-white/10 rounded-2xl p-6 sm:p-8 text-white space-y-6 shadow-2xl"
+                      style={{ minHeight: '680px' }}
+                    >
+                      {/* Cabeçalho do OPR */}
+                      <div className="flex items-center justify-between pb-4 border-b border-white/10">
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 bg-blue-600 rounded-2xl flex items-center justify-center font-black text-xl text-white shadow-lg shadow-blue-600/40">
+                            OG
+                          </div>
+                          <div>
+                            <span className="text-[10px] font-black uppercase tracking-widest text-emerald-400">OEE GUIDEWAY • EXCELLENCE REPORT</span>
+                            <h1 className="text-2xl font-black tracking-tight text-white">ONE PAGE REPORT — CONSOLIDAÇÃO MENSAL</h1>
+                            <p className="text-xs text-slate-400">Período de Referência: <strong>{oprData.monthFormatted} ({oprData.monthKey})</strong> • Total de Apontamentos: {oprData.totalRecords}</p>
+                          </div>
+                        </div>
+
+                        <div className="text-right">
+                          <span className="text-[10px] text-slate-500 uppercase font-mono block">Data de Emissão: {new Date().toLocaleDateString('pt-BR')}</span>
+                          <span className="text-xs font-bold text-slate-300">Responsável: {currentUser.name}</span>
+                        </div>
+                      </div>
+
+                      {/* a) BOX com indicadores CONSOLIDADOS no mês: OEE, DISPONIBILIDADE, PERFORMANCE, QUALIDADE, ÍNDICE DE QUEBRAS, TOTAL DE HORAS PARADAS, PRODUTIVIDADE */}
+                      <div>
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+                          <h3 className="text-xs font-black uppercase tracking-widest text-slate-300">
+                            A) Indicadores Consolidados da Fábrica no Mês ({oprData.monthFormatted})
+                          </h3>
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+                          <div className="p-3 bg-zinc-950/80 rounded-xl border border-white/10 flex flex-col justify-between">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">OEE Global</span>
+                            <span className="text-2xl font-black text-indigo-400 mt-1">{oprData.globalOee}%</span>
+                            <span className="text-[8px] text-slate-500 uppercase">{getOEEColorInfo(oprData.globalOee).rangeText}</span>
+                          </div>
+
+                          <div className="p-3 bg-zinc-950/80 rounded-xl border border-white/10 flex flex-col justify-between">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Disponibilidade</span>
+                            <span className="text-2xl font-black text-blue-400 mt-1">{oprData.globalDisp}%</span>
+                            <span className="text-[8px] text-slate-500 uppercase">Tempo Oper. / Prog.</span>
+                          </div>
+
+                          <div className="p-3 bg-zinc-950/80 rounded-xl border border-white/10 flex flex-col justify-between">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Performance</span>
+                            <span className="text-2xl font-black text-orange-400 mt-1">{oprData.globalPerf}%</span>
+                            <span className="text-[8px] text-slate-500 uppercase">Líquido / Operação</span>
+                          </div>
+
+                          <div className="p-3 bg-zinc-950/80 rounded-xl border border-white/10 flex flex-col justify-between">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Qualidade</span>
+                            <span className="text-2xl font-black text-emerald-400 mt-1">{oprData.globalQual}%</span>
+                            <span className="text-[8px] text-slate-500 uppercase">Útil / Líquido</span>
+                          </div>
+
+                          <div className="p-3 bg-zinc-950/80 rounded-xl border border-white/10 flex flex-col justify-between">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Índice de Quebras</span>
+                            <span className="text-2xl font-black text-amber-400 mt-1">{oprData.globalMaintenanceIndex}%</span>
+                            <span className="text-[8px] text-slate-500 uppercase">Meta &lt; 5.0%</span>
+                          </div>
+
+                          <div className="p-3 bg-zinc-950/80 rounded-xl border border-white/10 flex flex-col justify-between">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Total Paradas</span>
+                            <span className="text-2xl font-black text-red-400 mt-1">{oprData.totalStopsHours}h</span>
+                            <span className="text-[8px] text-slate-500 uppercase">Horas Perdidas</span>
+                          </div>
+
+                          <div className="p-3 bg-zinc-950/80 rounded-xl border border-white/10 flex flex-col justify-between">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Produtividade</span>
+                            <span className="text-2xl font-black text-teal-400 mt-1">{oprData.globalProductivity}</span>
+                            <span className="text-[8px] text-slate-500 uppercase">Fardos / Hora Prog.</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* b) GRÁFICO OEE do mês (Todas as Linhas) */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-blue-400" />
+                            <h3 className="text-xs font-black uppercase tracking-widest text-slate-300">
+                              B) Gráfico OEE Global do Mês (Todas as Linhas — Variação Diária)
+                            </h3>
+                          </div>
+                          <span className="text-[10px] text-slate-400 font-mono">Consolidado por dia de produção</span>
+                        </div>
+
+                        <div className="h-44 w-full bg-zinc-950/70 p-3 rounded-xl border border-white/10">
+                          {oprData.monthlyDailyChart.length > 0 ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                              <BarChart data={oprData.monthlyDailyChart} margin={{ top: 10, right: 10, left: -20, bottom: 5 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                                <XAxis dataKey="dia" stroke="#64748b" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                                <YAxis domain={[0, 100]} stroke="#64748b" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                                <Bar dataKey="oee" radius={[4, 4, 0, 0]}>
+                                  {oprData.monthlyDailyChart.map((entry, index) => (
+                                    <Cell key={`opr-daily-${index}`} fill={getOEEColorHex(entry.oee)} />
+                                  ))}
+                                  <LabelList 
+                                    dataKey="oee" 
+                                    position="top" 
+                                    formatter={(v: number) => `${v.toFixed(0)}%`} 
+                                    style={{ fill: '#cbd5e1', fontSize: 9, fontWeight: 700 }} 
+                                  />
+                                </Bar>
+                              </BarChart>
+                            </ResponsiveContainer>
+                          ) : (
+                            <div className="h-full flex items-center justify-center text-xs text-slate-500">
+                              Sem lançamentos diários suficientes no mês.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* c) BOX dos mesmos indicadores por linha e o Gráfico OEE INDIVIDUAL POR LINHA */}
+                      <div>
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full bg-indigo-400" />
+                            <h3 className="text-xs font-black uppercase tracking-widest text-slate-300">
+                              C) Indicadores e Gráfico OEE Individual por Linha
+                            </h3>
+                          </div>
+                          <span className="text-[10px] text-slate-400 font-mono">Comparativo das 9 Linhas de Produção</span>
+                        </div>
+
+                        {/* Gráfico OEE Individual por Linha */}
+                        <div className="h-44 w-full bg-zinc-950/70 p-3 rounded-xl border border-white/10 mb-4">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={oprData.linesData} margin={{ top: 10, right: 10, left: -20, bottom: 5 }}>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
+                              <XAxis dataKey="lineName" stroke="#64748b" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                              <YAxis domain={[0, 100]} stroke="#64748b" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                              <Bar dataKey="oee" radius={[4, 4, 0, 0]}>
+                                {oprData.linesData.map((entry, index) => (
+                                  <Cell key={`opr-line-${index}`} fill={entry.hasRecords ? getOEEColorHex(entry.oee) : '#3f3f46'} />
+                                ))}
+                                <LabelList 
+                                  dataKey="oee" 
+                                  position="top" 
+                                  formatter={(v: number) => v > 0 ? `${v.toFixed(1)}%` : '-'} 
+                                  style={{ fill: '#cbd5e1', fontSize: 9, fontWeight: 700 }} 
+                                />
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+
+                        {/* Tabela dos Indicadores Detalhados por Linha */}
+                        <div className="overflow-x-auto bg-zinc-950/80 rounded-xl border border-white/10">
+                          <table className="w-full text-left text-xs">
+                            <thead>
+                              <tr className="bg-white/5 border-b border-white/10 text-[9px] uppercase font-bold text-slate-400">
+                                <th className="px-3 py-2">Linha</th>
+                                <th className="px-3 py-2 text-center">Apontamentos</th>
+                                <th className="px-3 py-2 text-center text-blue-400">Disp.</th>
+                                <th className="px-3 py-2 text-center text-orange-400">Perf.</th>
+                                <th className="px-3 py-2 text-center text-emerald-400">Qual.</th>
+                                <th className="px-3 py-2 text-center text-indigo-400 font-bold">OEE</th>
+                                <th className="px-3 py-2 text-center text-amber-400">Índ. Quebras</th>
+                                <th className="px-3 py-2 text-center text-red-400">Paradas (h)</th>
+                                <th className="px-3 py-2 text-center text-teal-400">Produtiv. (fardos/h)</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5 font-mono text-[10px]">
+                              {oprData.linesData.map(l => (
+                                <tr key={l.lineName} className="hover:bg-white/5 transition-colors">
+                                  <td className="px-3 py-1.5 font-bold text-white font-sans">{l.lineName}</td>
+                                  <td className="px-3 py-1.5 text-center text-slate-400">{l.count}</td>
+                                  <td className="px-3 py-1.5 text-center text-slate-300">{l.hasRecords ? `${l.disp}%` : '-'}</td>
+                                  <td className="px-3 py-1.5 text-center text-slate-300">{l.hasRecords ? `${l.perf}%` : '-'}</td>
+                                  <td className="px-3 py-1.5 text-center text-slate-300">{l.hasRecords ? `${l.qual}%` : '-'}</td>
+                                  <td className="px-3 py-1.5 text-center font-bold" style={{ color: l.hasRecords ? getOEEColorHex(l.oee) : '#71717a' }}>
+                                    {l.hasRecords ? `${l.oee}%` : '-'}
+                                  </td>
+                                  <td className="px-3 py-1.5 text-center text-amber-300">{l.hasRecords ? `${l.maintenanceIndex}%` : '-'}</td>
+                                  <td className="px-3 py-1.5 text-center text-red-300">{l.hasRecords ? `${l.totalStopsHours}h` : '-'}</td>
+                                  <td className="px-3 py-1.5 text-center text-teal-300">{l.hasRecords ? `${l.productivity}` : '-'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Rodapé e Nota de Confiabilidade */}
+                      <div className="pt-3 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between text-[9px] text-slate-500">
+                        <span>OEE GUIDEWAY • Relatório gerencial automatizado em 1 página formato Paisagem</span>
+                        <span>Auditoria e Validação de Confiabilidade Industrial</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-16 text-center text-slate-400 text-sm">
+                      Nenhum registro encontrado no mês selecionado ({oprMonth}) para geração do One Page Report.
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            </div>
+          )}
         </AnimatePresence>
 
         <AnimatePresence>
