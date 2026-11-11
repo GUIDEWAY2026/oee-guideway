@@ -49,7 +49,14 @@ import {
   Wrench,
   FileText,
   Printer,
-  Layers
+  Layers,
+  ShieldCheck,
+  Shield,
+  Lock,
+  Key,
+  UserCheck,
+  Laptop,
+  Smartphone
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
@@ -57,6 +64,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import html2canvas from 'html2canvas';
+import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 
@@ -348,11 +356,14 @@ interface OEEResults {
 }
 
 // Types for Authentication
+export type UserRole = 'admin' | 'operador' | 'usuario';
+
 interface User {
   name: string;
   email: string;
   password: string;
   isAdmin: boolean;
+  role: UserRole;
 }
 
 // --- CONFIGURAÇÃO DE ACESSOS PADRÃO ---
@@ -360,6 +371,70 @@ interface User {
 // O administrador principal será verificado pelo e-mail.
 const MAIN_ADMIN_EMAIL = 'josemarcelolustosa@gmail.com';
 // ---------------------------------------------------------------
+
+export const isUserAdmin = (u: User | null | undefined): boolean => {
+  if (!u) return false;
+  return u.isAdmin === true || u.role === 'admin' || (typeof u.email === 'string' && u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase());
+};
+
+export const isUserViewer = (u: User | null | undefined): boolean => {
+  if (!u) return false;
+  return u.role === 'usuario' && !isUserAdmin(u);
+};
+
+export const canUserEdit = (u: User | null | undefined): boolean => {
+  if (!u) return false;
+  return !isUserViewer(u);
+};
+
+// =========================================================================
+// SISTEMA DE CRIPTOGRAFIA DE SENHAS (SHA-256 COM SALT SEGURO)
+// =========================================================================
+const PASSWORD_SALT = 'guideway_oee_secure_salt_v2';
+
+export const hashPassword = async (plainPassword: string, salt: string = PASSWORD_SALT): Promise<string> => {
+  if (!plainPassword) return '';
+  try {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(`${salt}:${plainPassword}:${salt}`);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return `sha256:${hashHex}`;
+  } catch (e) {
+    let hash = 0;
+    const combined = `${salt}:${plainPassword}:${salt}`;
+    for (let i = 0; i < combined.length; i++) {
+      const char = combined.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash;
+    }
+    return `sha256:fb_${Math.abs(hash).toString(16)}`;
+  }
+};
+
+export const verifyPassword = async (inputPassword: string, storedPasswordHash: string): Promise<boolean> => {
+  if (!storedPasswordHash || !inputPassword) return false;
+  // Suporte a senhas legadas em texto puro (migração automática transparente)
+  if (!storedPasswordHash.startsWith('sha256:')) {
+    return inputPassword === storedPasswordHash;
+  }
+  const computedHash = await hashPassword(inputPassword);
+  return computedHash === storedPasswordHash;
+};
+
+// =========================================================================
+// CONTROLE DE ACESSO & AUDITORIA DE LOGINS
+// =========================================================================
+export interface AccessLog {
+  id: string;
+  user_name: string;
+  user_email: string;
+  user_role: UserRole | string;
+  login_at: string;
+  device_info: string;
+  status: 'sucesso' | 'falha';
+}
 
 // --- CONFIGURAÇÃO DAS LINHAS DE PRODUÇÃO (LAYOUT DA FÁBRICA) ---
 export const PRODUCTION_LINES = [
@@ -541,7 +616,16 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [adminTab, setAdminTab] = useState<'users' | 'stops' | 'lines' | 'export'>('users');
+  const [adminTab, setAdminTab] = useState<'users' | 'access_logs' | 'stops' | 'lines' | 'export'>('users');
+  const [accessLogs, setAccessLogs] = useState<AccessLog[]>(() => {
+    return safeGetLocalStorage<AccessLog[]>('oee_access_logs', []);
+  });
+  const [isLoadingAccessLogs, setIsLoadingAccessLogs] = useState(false);
+  const [accessLogSearch, setAccessLogSearch] = useState('');
+  const [accessLogFilterRole, setAccessLogFilterRole] = useState<'todos' | 'admin' | 'operador' | 'usuario'>('todos');
+  const [accessLogFilterStatus, setAccessLogFilterStatus] = useState<'todos' | 'sucesso' | 'falha'>('todos');
+  const [resettingUserEmail, setResettingUserEmail] = useState<string | null>(null);
+  const [newPasswordForUser, setNewPasswordForUser] = useState<string>('');
   const [users, setUsers] = useState<User[]>([]);
   const [stopCodes, setStopCodes] = useState<StopCode[]>(DEFAULT_STOP_CODES);
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
@@ -804,25 +888,31 @@ export default function App() {
   // Buscar usuários do Supabase (Apenas para ADM)
   const ensureAdminExists = async () => {
     try {
+      const defaultAdminPassHash = await hashPassword('admin');
+
       if (useLocalFallback) {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
-        const adminExists = localUsers.some(u => u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase());
-        if (!adminExists) {
+        const adminIndex = localUsers.findIndex(u => u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase());
+        if (adminIndex === -1) {
           const newAdmin = {
             name: 'Administrador Guideway',
             email: MAIN_ADMIN_EMAIL,
-            password: 'admin',
-            is_admin: true
+            password: defaultAdminPassHash,
+            is_admin: true,
+            role: 'admin'
           };
           localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, newAdmin]));
         } else {
-          // Garante que o administrador local existente de fato tenha a flag is_admin: true
-          const updatedUsers = localUsers.map(u => {
-            if (u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()) {
-              return { ...u, is_admin: true };
-            }
-            return u;
-          });
+          // Garante que o administrador local existente de fato tenha a flag is_admin: true, role: 'admin' e senha criptografada
+          const existing = localUsers[adminIndex];
+          const hasEncryptedPass = existing.password && existing.password.startsWith('sha256:');
+          const updatedUsers = [...localUsers];
+          updatedUsers[adminIndex] = {
+            ...existing,
+            is_admin: true,
+            role: 'admin',
+            password: hasEncryptedPass ? existing.password : defaultAdminPassHash
+          };
           localStorage.setItem('oee_local_users', JSON.stringify(updatedUsers));
         }
         return;
@@ -836,19 +926,25 @@ export default function App() {
         .maybeSingle();
       
       if (!data) {
-        console.log('Criando usuário administrador inicial...');
+        console.log('Criando usuário administrador inicial com senha criptografada...');
         await supabase.from('users').insert([{
           name: 'Administrador Guideway',
           email: MAIN_ADMIN_EMAIL,
-          password: 'admin', // Senha padrão inicial
+          password: defaultAdminPassHash,
           is_admin: true
         }]);
-      } else if (!data.is_admin) {
-        console.log('Atualizando usuário existente para administrador...');
-        await supabase
-          .from('users')
-          .update({ is_admin: true })
-          .eq('email', data.email);
+      } else {
+        const updates: any = {};
+        if (!data.is_admin) updates.is_admin = true;
+        if (data.password && !data.password.startsWith('sha256:')) {
+          updates.password = defaultAdminPassHash;
+        }
+        if (Object.keys(updates).length > 0) {
+          await supabase
+            .from('users')
+            .update(updates)
+            .eq('email', data.email);
+        }
       }
     } catch (err) {
       console.error('Erro ao verificar administrador:', err);
@@ -856,17 +952,25 @@ export default function App() {
   };
 
   const fetchUsers = async () => {
-    if (!currentUser?.isAdmin) return;
+    if (!isUserAdmin(currentUser)) return;
     setIsLoadingUsers(true);
     try {
       if (useLocalFallback) {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
-        setUsers(localUsers.map(u => ({
-          name: u.name,
-          email: u.email,
-          password: u.password,
-          isAdmin: u.is_admin
-        })));
+        setUsers(localUsers.map(u => {
+          const role: UserRole = (u.role === 'usuario' || u.role === 'admin' || u.role === 'operador')
+            ? u.role
+            : (u.is_admin || (u.email && u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()))
+              ? 'admin'
+              : 'operador';
+          return {
+            name: u.name,
+            email: u.email,
+            password: u.password,
+            isAdmin: role === 'admin',
+            role
+          };
+        }));
         return;
       }
 
@@ -876,23 +980,136 @@ export default function App() {
         .order('name', { ascending: true });
       
       if (error) throw error;
-      if (data) setUsers(data.map(u => ({
-        name: u.name,
-        email: u.email,
-        password: u.password,
-        isAdmin: u.is_admin
-      })));
+      if (data) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        setUsers(data.map(u => {
+          const localMatch = localUsers.find(lu => lu.email.toLowerCase() === u.email.toLowerCase());
+          const role: UserRole = (u.role === 'usuario' || u.role === 'admin' || u.role === 'operador')
+            ? u.role
+            : (localMatch?.role === 'usuario' || localMatch?.role === 'admin' || localMatch?.role === 'operador')
+              ? localMatch.role
+              : (u.is_admin || (u.email && u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()))
+                ? 'admin'
+                : 'operador';
+          return {
+            name: u.name,
+            email: u.email,
+            password: u.password,
+            isAdmin: role === 'admin',
+            role
+          };
+        }));
+      }
     } catch (error: any) {
       console.error('Erro ao buscar usuários, usando local:', error);
       const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
-      setUsers(localUsers.map(u => ({
-        name: u.name,
-        email: u.email,
-        password: u.password,
-        isAdmin: u.is_admin
-      })));
+      setUsers(localUsers.map(u => {
+        const role: UserRole = (u.role === 'usuario' || u.role === 'admin' || u.role === 'operador')
+          ? u.role
+          : (u.is_admin || (u.email && u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()))
+            ? 'admin'
+            : 'operador';
+        return {
+          name: u.name,
+          email: u.email,
+          password: u.password,
+          isAdmin: role === 'admin',
+          role
+        };
+      }));
     } finally {
       setIsLoadingUsers(false);
+    }
+  };
+
+  // Gravar registro de acesso / login para auditoria do Administrador
+  const recordAccessLog = async (logData: { user_name: string; user_email: string; user_role: string; status: 'sucesso' | 'falha'; device_info: string }) => {
+    try {
+      const newEntry: AccessLog = {
+        id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        user_name: logData.user_name || 'Desconhecido',
+        user_email: logData.user_email || 'sem-email',
+        user_role: logData.user_role || 'operador',
+        login_at: new Date().toISOString(),
+        device_info: logData.device_info,
+        status: logData.status
+      };
+
+      // Sempre armazena no cache local persistente
+      const localLogs = safeGetLocalStorage<AccessLog[]>('oee_access_logs', []);
+      const updated = [newEntry, ...localLogs].slice(0, 1000);
+      localStorage.setItem('oee_access_logs', JSON.stringify(updated));
+      setAccessLogs(updated);
+
+      // Tenta gravar no Supabase caso a tabela access_logs exista
+      if (!useLocalFallback) {
+        try {
+          await supabase.from('access_logs').insert([{
+            user_name: newEntry.user_name,
+            user_email: newEntry.user_email,
+            user_role: newEntry.user_role,
+            login_at: newEntry.login_at,
+            device_info: newEntry.device_info,
+            status: newEntry.status
+          }]);
+        } catch {
+          // Falha silenciosa se tabela remota não existir ainda
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao registrar log de acesso:', err);
+    }
+  };
+
+  // Buscar histórico de acessos para o painel de auditoria do ADMIN
+  const fetchAccessLogs = async () => {
+    if (!isUserAdmin(currentUser)) return;
+    setIsLoadingAccessLogs(true);
+    try {
+      const localLogs = safeGetLocalStorage<AccessLog[]>('oee_access_logs', []);
+      if (useLocalFallback) {
+        setAccessLogs(localLogs);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('access_logs')
+        .select('*')
+        .order('login_at', { ascending: false })
+        .limit(300);
+
+      if (error || !data || data.length === 0) {
+        setAccessLogs(localLogs);
+      } else {
+        // Mesclar dados do Supabase com os locais
+        const map = new Map<string, AccessLog>();
+        data.forEach(item => {
+          const key = item.id || `${item.login_at}_${item.user_email}`;
+          map.set(key, {
+            id: item.id || `log-${item.login_at}`,
+            user_name: item.user_name,
+            user_email: item.user_email,
+            user_role: item.user_role,
+            login_at: item.login_at,
+            device_info: item.device_info,
+            status: item.status || 'sucesso'
+          });
+        });
+        localLogs.forEach(item => {
+          if (!map.has(item.id)) {
+            map.set(item.id, item);
+          }
+        });
+        const merged = Array.from(map.values()).sort(
+          (a, b) => new Date(b.login_at).getTime() - new Date(a.login_at).getTime()
+        );
+        setAccessLogs(merged);
+      }
+    } catch (e) {
+      const localLogs = safeGetLocalStorage<AccessLog[]>('oee_access_logs', []);
+      setAccessLogs(localLogs);
+    } finally {
+      setIsLoadingAccessLogs(false);
     }
   };
 
@@ -1213,7 +1430,7 @@ export default function App() {
   // Exportação profissional para Planilha Excel (.xlsx / XML Spreadsheet)
   // Contendo TODOS os parâmetros de entrada, paradas calculadas, perdas e índices OEE
   const exportToExcelHandler = async (scope: 'filtered' | 'all' = 'all') => {
-    if (!currentUser?.isAdmin) {
+    if (!isUserAdmin(currentUser)) {
       alert('Acesso restrito: Apenas administradores podem realizar o download da base de dados.');
       return;
     }
@@ -1528,7 +1745,7 @@ ${rowsXml}
 
 
   const deleteRecord = async (id: string) => {
-    if (!currentUser?.isAdmin) {
+    if (!isUserAdmin(currentUser)) {
       alert('Apenas administradores podem excluir registros.');
       return;
     }
@@ -2586,6 +2803,7 @@ ${rowsXml}
   }, [allSystemRecords, oprMonth, stopCodes]);
 
   // Função para Download do One Page Report em PDF formato Paisagem (Landscape) com fundo BRANCO
+  // Função robusta para Download do One Page Report em PDF formato Paisagem (Landscape)
   const downloadOnePageReportPdf = async () => {
     if (!oprPrintRef.current) return;
     setIsExportingPdf(true);
@@ -2593,22 +2811,34 @@ ${rowsXml}
     try {
       const element = oprPrintRef.current;
 
-      const html2canvasFunc = typeof html2canvas === 'function' 
-        ? html2canvas 
-        : ((html2canvas as any).default || html2canvas);
+      let imgData = '';
+      try {
+        // Tenta gerar PNG via html-to-image (renderização nativa que suporta modern CSS, OKLCH, SVGs e grids)
+        imgData = await toPng(element, {
+          backgroundColor: '#ffffff',
+          pixelRatio: 2,
+          quality: 0.98,
+          cacheBust: true,
+        });
+      } catch (errHtmlToImage) {
+        console.warn('html-to-image encontrou aviso, tentando fallback com html2canvas:', errHtmlToImage);
+        const html2canvasFunc = typeof html2canvas === 'function' 
+          ? html2canvas 
+          : ((html2canvas as any).default || html2canvas);
 
-      // Renderiza em canvas com fundo 100% branco e alta resolução
-      const canvas = await html2canvasFunc(element, {
-        scale: 2,
-        useCORS: true,
-        backgroundColor: '#ffffff',
-        logging: false,
-        scrollX: 0,
-        scrollY: 0,
-        windowWidth: 1200
-      });
+        const canvas = await html2canvasFunc(element, {
+          scale: 2,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          logging: false,
+        });
+        imgData = canvas.toDataURL('image/png');
+      }
 
-      const imgData = canvas.toDataURL('image/png');
+      if (!imgData) {
+        throw new Error('Falha ao renderizar imagem do relatório');
+      }
+
       const JsPdfClass = typeof jsPDF === 'function' 
         ? jsPDF 
         : ((jsPDF as any).jsPDF || (jsPDF as any).default);
@@ -2624,9 +2854,15 @@ ${rowsXml}
       const pdfWidth = 297;
       const pdfHeight = 210;
 
-      // Ajusta para caber exatamente em 1 página em formato Paisagem sem quebra
+      // Obter dimensões reais da imagem renderizada
+      const img = new Image();
+      img.src = imgData;
+      await new Promise((resolve) => {
+        img.onload = resolve;
+      });
+
       const imgWidth = pdfWidth;
-      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      const imgHeight = (img.height * imgWidth) / img.width;
 
       let renderWidth = imgWidth;
       let renderHeight = imgHeight;
@@ -2635,7 +2871,7 @@ ${rowsXml}
 
       if (imgHeight > pdfHeight) {
         renderHeight = pdfHeight;
-        renderWidth = (canvas.width * renderHeight) / canvas.height;
+        renderWidth = (img.width * renderHeight) / img.height;
         posX = (pdfWidth - renderWidth) / 2;
         posY = 0;
       } else {
@@ -2646,9 +2882,105 @@ ${rowsXml}
       pdf.save(`ONE_PAGE_REPORT_OEE_${oprMonth || 'MENSAL'}.pdf`);
     } catch (err: any) {
       console.error('Erro ao gerar PDF do One Page Report:', err);
-      setPdfExportError('Não foi possível gerar o arquivo PDF diretamente. Você também pode clicar no botão Imprimir.');
+      setPdfExportError(`Não foi possível gerar o PDF diretamente. Você pode usar o botão "Imprimir (1 Página)" para salvar como PDF com facilidade.`);
     } finally {
       setIsExportingPdf(false);
+    }
+  };
+
+  // Função para Impressão Nativa isolada garantindo EXATAMENTE 1 página
+  const printOnePageReport = () => {
+    if (!oprPrintRef.current) return;
+
+    try {
+      const element = oprPrintRef.current;
+
+      // Cria um iframe invisível para isolar completamente o relatório do restante do aplicativo
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = '0';
+      document.body.appendChild(iframe);
+
+      const doc = iframe.contentWindow?.document;
+      if (!doc) {
+        window.print();
+        return;
+      }
+
+      // Copia estilos e fontes da página principal
+      const styles = Array.from(document.querySelectorAll('style, link[rel="stylesheet"]'))
+        .map(el => el.outerHTML)
+        .join('\n');
+
+      const contentHtml = element.outerHTML;
+
+      doc.open();
+      doc.write(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>ONE PAGE REPORT - OEE GUIDEWAY (${oprMonth})</title>
+            ${styles}
+            <style>
+              @page {
+                size: A4 landscape;
+                margin: 4mm 6mm;
+              }
+              html, body {
+                width: 100% !important;
+                height: 100% !important;
+                max-height: 100% !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                background: #ffffff !important;
+                overflow: hidden !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+              }
+              #opr-printable-report {
+                width: 100% !important;
+                max-width: 100% !important;
+                height: auto !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                box-shadow: none !important;
+                border: none !important;
+                background: #ffffff !important;
+                page-break-after: avoid !important;
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+              }
+            </style>
+          </head>
+          <body>
+            ${contentHtml}
+          </body>
+        </html>
+      `);
+      doc.close();
+
+      setTimeout(() => {
+        try {
+          iframe.contentWindow?.focus();
+          iframe.contentWindow?.print();
+        } catch (e) {
+          console.warn('Erro na impressão por iframe, usando fallback:', e);
+          window.print();
+        } finally {
+          setTimeout(() => {
+            if (document.body.contains(iframe)) {
+              document.body.removeChild(iframe);
+            }
+          }, 1500);
+        }
+      }, 400);
+    } catch (e) {
+      console.error('Falha ao abrir impressão isolada:', e);
+      window.print();
     }
   };
 
@@ -2692,9 +3024,12 @@ ${rowsXml}
       try {
         const parsed = JSON.parse(session);
         if (parsed) {
-          // Garante que se o e-mail da sessão for o do admin principal, herda isAdmin true instantaneamente
+          // Garante que se o e-mail da sessão for o do admin principal, herda isAdmin true e role admin instantaneamente
           if (parsed.email && parsed.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()) {
             parsed.isAdmin = true;
+            parsed.role = 'admin';
+          } else if (!parsed.role) {
+            parsed.role = parsed.isAdmin ? 'admin' : 'operador';
           }
           setCurrentUser(parsed);
         }
@@ -2703,6 +3038,18 @@ ${rowsXml}
       }
     }
   }, []);
+
+  // Proteção de rota para perfil USUÁRIO (Visualizador apenas: Dashboard, Evolução e Manutenção)
+  useEffect(() => {
+    if (currentUser && currentUser.role === 'usuario') {
+      if (activeTab === 'inputs') {
+        setActiveTab('dashboard');
+      }
+      if (showAdminPanel) {
+        setShowAdminPanel(false);
+      }
+    }
+  }, [currentUser, activeTab, showAdminPanel]);
 
   // Inicializar dashboard com o último registro quando o usuário logar
   useEffect(() => {
@@ -2720,39 +3067,90 @@ ${rowsXml}
     
     try {
       const cleanEmail = loginEmail.trim();
+      const clientDevice = typeof navigator !== 'undefined' 
+        ? (navigator.userAgent.includes('Mobile') ? 'Mobile / Smartphone' : 'Desktop / Computador')
+        : 'Desktop';
       
       if (useLocalFallback) {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
         
-        // Se a lista estiver vazia, verifique e insira o admin principal padrão
+        // Se a lista estiver vazia, verifique e insira o admin principal padrão com senha criptografada
         const adminExists = localUsers.some(u => u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase());
         let updatedUsers = [...localUsers];
         if (!adminExists) {
+          const defaultAdminPassHash = await hashPassword('admin');
           const defaultAdmin = {
             name: 'Administrador Guideway',
             email: MAIN_ADMIN_EMAIL,
-            password: 'admin',
-            is_admin: true
+            password: defaultAdminPassHash,
+            is_admin: true,
+            role: 'admin'
           };
           updatedUsers = [...localUsers, defaultAdmin];
           localStorage.setItem('oee_local_users', JSON.stringify(updatedUsers));
         }
 
         const matched = updatedUsers.find(u => 
-          u.email.toLowerCase() === cleanEmail.toLowerCase() && 
-          u.password === loginPassword
+          u.email.toLowerCase() === cleanEmail.toLowerCase()
         );
+
         if (!matched) {
+          recordAccessLog({
+            user_name: 'Tentativa não autorizada',
+            user_email: cleanEmail,
+            user_role: 'desconhecido',
+            status: 'falha',
+            device_info: clientDevice
+          });
           setLoginError('E-mail ou senha incorretos.');
           return;
         }
+
+        const isPasswordValid = await verifyPassword(loginPassword, matched.password);
+        if (!isPasswordValid) {
+          recordAccessLog({
+            user_name: matched.name,
+            user_email: matched.email,
+            user_role: matched.role || (matched.is_admin ? 'admin' : 'operador'),
+            status: 'falha',
+            device_info: clientDevice
+          });
+          setLoginError('E-mail ou senha incorretos.');
+          return;
+        }
+
+        // Se a senha armazenada ainda for em texto puro legado, faz upgrade criptográfico automático imediato
+        if (matched.password && !matched.password.startsWith('sha256:')) {
+          const newHashed = await hashPassword(loginPassword);
+          const migratedUsers = updatedUsers.map(u => 
+            u.email.toLowerCase() === cleanEmail.toLowerCase() ? { ...u, password: newHashed } : u
+          );
+          localStorage.setItem('oee_local_users', JSON.stringify(migratedUsers));
+          matched.password = newHashed;
+        }
+
+        const role: UserRole = (matched.role === 'usuario' || matched.role === 'admin' || matched.role === 'operador')
+          ? matched.role
+          : (matched.is_admin || matched.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase())
+            ? 'admin'
+            : 'operador';
 
         const user: User = {
           name: matched.name,
           email: matched.email,
           password: matched.password,
-          isAdmin: matched.is_admin || matched.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()
+          isAdmin: role === 'admin',
+          role
         };
+
+        // REGISTRAR LOGIN COM SUCESSO NO CONTROLE DE ACESSOS
+        recordAccessLog({
+          user_name: user.name,
+          user_email: user.email,
+          user_role: user.role,
+          status: 'sucesso',
+          device_info: clientDevice
+        });
 
         setCurrentUser(user);
         localStorage.setItem('oee_guide_session', JSON.stringify(user));
@@ -2764,26 +3162,74 @@ ${rowsXml}
         .from('users')
         .select('*')
         .ilike('email', cleanEmail)
-        .eq('password', loginPassword)
         .maybeSingle();
 
       if (error || !data) {
+        recordAccessLog({
+          user_name: 'Tentativa não autorizada',
+          user_email: cleanEmail,
+          user_role: 'desconhecido',
+          status: 'falha',
+          device_info: clientDevice
+        });
         setLoginError('E-mail ou senha incorretos.');
         return;
       }
+
+      const isPasswordValid = await verifyPassword(loginPassword, data.password);
+      if (!isPasswordValid) {
+        recordAccessLog({
+          user_name: data.name,
+          user_email: data.email,
+          user_role: data.role || (data.is_admin ? 'admin' : 'operador'),
+          status: 'falha',
+          device_info: clientDevice
+        });
+        setLoginError('E-mail ou senha incorretos.');
+        return;
+      }
+
+      // Se a senha no Supabase ainda for texto puro, faz upgrade criptográfico
+      if (data.password && !data.password.startsWith('sha256:')) {
+        const newHashed = await hashPassword(loginPassword);
+        try {
+          await supabase.from('users').update({ password: newHashed }).eq('id', data.id);
+        } catch {}
+        data.password = newHashed;
+      }
+
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      const localMatch = localUsers.find(lu => lu.email.toLowerCase() === cleanEmail.toLowerCase());
+      const role: UserRole = (data.role === 'usuario' || data.role === 'admin' || data.role === 'operador')
+        ? data.role
+        : (localMatch?.role === 'usuario' || localMatch?.role === 'admin' || localMatch?.role === 'operador')
+          ? localMatch.role
+          : (data.is_admin || data.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase())
+            ? 'admin'
+            : 'operador';
 
       const user: User = {
         name: data.name,
         email: data.email,
         password: data.password,
-        isAdmin: data.is_admin || data.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()
+        isAdmin: role === 'admin',
+        role
       };
+
+      // REGISTRAR LOGIN COM SUCESSO NO CONTROLE DE ACESSOS
+      recordAccessLog({
+        user_name: user.name,
+        user_email: user.email,
+        user_role: user.role,
+        status: 'sucesso',
+        device_info: clientDevice
+      });
 
       setCurrentUser(user);
       localStorage.setItem('oee_guide_session', JSON.stringify(user));
     } catch (error) {
       console.error('Erro no login:', error);
-      setLoginError('Erro de conexão com o Supabase. Verifique sua conexão de rede e se as variáveis de ambiente no Netlify estão corretas.');
+      setLoginError('Erro de conexão com o banco de dados. Verifique sua conexão de rede.');
     }
   };
 
@@ -2798,53 +3244,127 @@ ${rowsXml}
   const [newUserName, setNewUserName] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
-  const [newUserIsAdmin, setNewUserIsAdmin] = useState(false);
+  const [newUserRole, setNewUserRole] = useState<UserRole>('operador');
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const cleanEmail = newUserEmail.trim();
+      const isAdminRole = newUserRole === 'admin';
+      const passwordHashed = await hashPassword(newUserPassword);
+
       if (useLocalFallback) {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
-        if (localUsers.some(u => u.email === newUserEmail)) {
+        if (localUsers.some(u => u.email.toLowerCase() === cleanEmail.toLowerCase())) {
           alert('Erro: Um usuário com este e-mail já existe.');
           return;
         }
         const newUser = {
           name: newUserName,
-          email: newUserEmail,
-          password: newUserPassword,
-          is_admin: newUserIsAdmin
+          email: cleanEmail,
+          password: passwordHashed,
+          is_admin: isAdminRole,
+          role: newUserRole
         };
         localStorage.setItem('oee_local_users', JSON.stringify([...localUsers, newUser]));
-        alert('Usuário criado com sucesso!');
+        alert(`Usuário criado com sucesso com perfil ${newUserRole.toUpperCase()} e senha criptografada (SHA-256)!`);
         setNewUserName('');
         setNewUserEmail('');
         setNewUserPassword('');
-        setNewUserIsAdmin(false);
+        setNewUserRole('operador');
+        fetchUsers();
+        return;
+      }
+
+      // Tenta gravar com a coluna role se ela existir e com a senha criptografada
+      const userPayload: any = {
+        name: newUserName,
+        email: cleanEmail,
+        password: passwordHashed,
+        is_admin: isAdminRole,
+        role: newUserRole
+      };
+
+      const { error } = await supabase
+        .from('users')
+        .insert([userPayload]);
+
+      if (error) {
+        if (error.message?.includes('column "role"') || error.code === '42703') {
+          const fallbackPayload = {
+            name: newUserName,
+            email: cleanEmail,
+            password: passwordHashed,
+            is_admin: isAdminRole
+          };
+          const { error: err2 } = await supabase.from('users').insert([fallbackPayload]);
+          if (err2) throw err2;
+        } else {
+          throw error;
+        }
+      }
+
+      // Sincroniza no cache local
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      const updatedLocal = localUsers.filter(u => u.email.toLowerCase() !== cleanEmail.toLowerCase());
+      updatedLocal.push({
+        name: newUserName,
+        email: cleanEmail,
+        password: passwordHashed,
+        is_admin: isAdminRole,
+        role: newUserRole
+      });
+      localStorage.setItem('oee_local_users', JSON.stringify(updatedLocal));
+
+      alert(`Usuário criado com sucesso com perfil ${newUserRole.toUpperCase()} e senha criptografada (SHA-256)!`);
+      setNewUserName('');
+      setNewUserEmail('');
+      setNewUserPassword('');
+      setNewUserRole('operador');
+      fetchUsers();
+    } catch (error: any) {
+      console.error('Erro ao criar usuário:', error);
+      alert('Erro ao criar usuário: ' + error.message);
+    }
+  };
+
+  // Redefinir senha com criptografia
+  const handleResetPassword = async (email: string, plainNewPassword: string) => {
+    if (!plainNewPassword.trim()) {
+      alert('Por favor, informe a nova senha.');
+      return;
+    }
+    try {
+      const hashed = await hashPassword(plainNewPassword.trim());
+      if (useLocalFallback) {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        const updated = localUsers.map(u => u.email.toLowerCase() === email.toLowerCase() ? { ...u, password: hashed } : u);
+        localStorage.setItem('oee_local_users', JSON.stringify(updated));
+        alert('Senha redefinida com sucesso e protegida com criptografia SHA-256!');
+        setResettingUserEmail(null);
+        setNewPasswordForUser('');
         fetchUsers();
         return;
       }
 
       const { error } = await supabase
         .from('users')
-        .insert([{
-          name: newUserName,
-          email: newUserEmail,
-          password: newUserPassword,
-          is_admin: newUserIsAdmin
-        }]);
+        .update({ password: hashed })
+        .ilike('email', email);
 
       if (error) throw error;
 
-      alert('Usuário criado com sucesso!');
-      setNewUserName('');
-      setNewUserEmail('');
-      setNewUserPassword('');
-      setNewUserIsAdmin(false);
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      const updated = localUsers.map(u => u.email.toLowerCase() === email.toLowerCase() ? { ...u, password: hashed } : u);
+      localStorage.setItem('oee_local_users', JSON.stringify(updated));
+
+      alert('Senha redefinida com sucesso e protegida com criptografia SHA-256!');
+      setResettingUserEmail(null);
+      setNewPasswordForUser('');
       fetchUsers();
-    } catch (error: any) {
-      console.error('Erro ao criar usuário:', error);
-      alert('Erro ao criar usuário: ' + error.message);
+    } catch (e: any) {
+      console.error('Erro ao redefinir senha:', e);
+      alert('Erro ao redefinir senha: ' + e.message);
     }
   };
 
@@ -3202,15 +3722,17 @@ ${rowsXml}
             <Wrench size={20} />
             <span className="hidden md:inline">Manutenção Industrial</span>
           </button>
-          <button 
-            onClick={() => { setActiveTab('inputs'); setShowAdminPanel(false); }}
-            className={`flex-1 md:flex-none flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'inputs' && !showAdminPanel ? 'bg-blue-600 text-white font-semibold shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:bg-white/5'}`}
-          >
-            <Settings size={20} />
-            <span className="hidden md:inline">Parâmetros</span>
-          </button>
+          {canUserEdit(currentUser) && (
+            <button 
+              onClick={() => { setActiveTab('inputs'); setShowAdminPanel(false); }}
+              className={`flex-1 md:flex-none flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${activeTab === 'inputs' && !showAdminPanel ? 'bg-blue-600 text-white font-semibold shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:bg-white/5'}`}
+            >
+              <Settings size={20} />
+              <span className="hidden md:inline">Parâmetros</span>
+            </button>
+          )}
           
-          {currentUser.isAdmin && (
+          {isUserAdmin(currentUser) && (
             <button 
               onClick={() => setShowAdminPanel(true)}
               className={`flex-1 md:flex-none flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${showAdminPanel ? 'bg-emerald-600 text-white font-semibold shadow-lg shadow-emerald-600/20' : 'text-slate-400 hover:bg-white/5'}`}
@@ -3236,7 +3758,9 @@ ${rowsXml}
             </div>
             <div className="overflow-hidden">
               <p className="text-xs font-bold text-white truncate">{currentUser.name}</p>
-              <p className="text-[10px] text-slate-500 uppercase tracking-widest">{currentUser.isAdmin ? 'Admin' : 'Operador'}</p>
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest">
+                {isUserAdmin(currentUser) ? 'Admin' : currentUser.role === 'usuario' ? 'Usuário (Visualizador)' : 'Operador'}
+              </p>
             </div>
           </div>
         </div>
@@ -3245,7 +3769,7 @@ ${rowsXml}
       {/* Main Content */}
       <main className="flex-1 overflow-y-auto p-4 md:p-8 lg:p-12">
         <AnimatePresence mode="wait">
-          {showAdminPanel && currentUser.isAdmin ? (
+          {showAdminPanel && isUserAdmin(currentUser) ? (
             <motion.div 
               key="admin"
               initial={{ opacity: 0, y: 20 }}
@@ -3264,6 +3788,14 @@ ${rowsXml}
                     className={`px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${adminTab === 'users' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/20' : 'text-slate-400 hover:text-white'}`}
                   >
                     Usuários
+                  </button>
+                  <button 
+                    onClick={() => { setAdminTab('access_logs'); fetchAccessLogs(); }}
+                    className={`px-5 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${adminTab === 'access_logs' ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/20' : 'text-purple-400 hover:text-white hover:bg-purple-500/10'}`}
+                  >
+                    <ShieldCheck size={15} />
+                    Controle de Acessos
+                    <span className="text-[10px] bg-white/10 px-1.5 py-0.5 rounded-md font-mono">{accessLogs.length}</span>
                   </button>
                   <button 
                     onClick={() => setAdminTab('stops')}
@@ -3333,21 +3865,75 @@ ${rowsXml}
                           required
                         />
                       </div>
-                      <div className="flex items-center gap-3 px-2">
-                        <input 
-                          type="checkbox" 
-                          id="isAdmin"
-                          checked={newUserIsAdmin}
-                          onChange={(e) => setNewUserIsAdmin(e.target.checked)}
-                          className="w-4 h-4 rounded border-white/10 bg-white/5 text-blue-600 focus:ring-blue-500/50"
-                        />
-                        <label htmlFor="isAdmin" className="text-xs font-bold text-slate-400 cursor-pointer">
-                          Este usuário é Administrador?
-                        </label>
+                      {/* Seletor de Perfil de Acesso */}
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Perfil de Acesso</label>
+                        <div className="space-y-2">
+                          <label className={`flex items-start gap-3 p-3 rounded-2xl border transition-all cursor-pointer ${newUserRole === 'admin' ? 'bg-emerald-500/10 border-emerald-500/40 text-white' : 'bg-white/5 border-white/5 text-slate-400 hover:bg-white/10'}`}>
+                            <input 
+                              type="radio" 
+                              name="newUserRole" 
+                              value="admin"
+                              checked={newUserRole === 'admin'}
+                              onChange={() => setNewUserRole('admin')}
+                              className="mt-1 text-emerald-500 focus:ring-emerald-500/50"
+                            />
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-emerald-400">ADMIN (Administrador)</span>
+                                <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono uppercase">Acesso Total</span>
+                              </div>
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                Acesso irrestrito a todos os menus, Gestão de Usuários, One Page Report, Exportação Excel, Download Relatório e IA.
+                              </p>
+                            </div>
+                          </label>
+
+                          <label className={`flex items-start gap-3 p-3 rounded-2xl border transition-all cursor-pointer ${newUserRole === 'operador' ? 'bg-blue-500/10 border-blue-500/40 text-white' : 'bg-white/5 border-white/5 text-slate-400 hover:bg-white/10'}`}>
+                            <input 
+                              type="radio" 
+                              name="newUserRole" 
+                              value="operador"
+                              checked={newUserRole === 'operador'}
+                              onChange={() => setNewUserRole('operador')}
+                              className="mt-1 text-blue-500 focus:ring-blue-500/50"
+                            />
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-blue-400">OPERADOR (Operador de Linha)</span>
+                                <span className="text-[9px] bg-blue-500/20 text-blue-300 px-1.5 py-0.5 rounded font-mono uppercase">Apontamentos</span>
+                              </div>
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                Acesso a Dashboard, Evolução, Manutenção e Parâmetros (apontamento e correção de dados da linha).
+                              </p>
+                            </div>
+                          </label>
+
+                          <label className={`flex items-start gap-3 p-3 rounded-2xl border transition-all cursor-pointer ${newUserRole === 'usuario' ? 'bg-purple-500/10 border-purple-500/40 text-white' : 'bg-white/5 border-white/5 text-slate-400 hover:bg-white/10'}`}>
+                            <input 
+                              type="radio" 
+                              name="newUserRole" 
+                              value="usuario"
+                              checked={newUserRole === 'usuario'}
+                              onChange={() => setNewUserRole('usuario')}
+                              className="mt-1 text-purple-500 focus:ring-purple-500/50"
+                            />
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-purple-400">USUÁRIO (Visualizador)</span>
+                                <span className="text-[9px] bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded font-mono uppercase">Somente Leitura</span>
+                              </div>
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                Somente visualização dos menus Dashboard, Evolução e Manutenção. Sem permissão de edição, sem Parâmetros e sem exportações.
+                              </p>
+                            </div>
+                          </label>
+                        </div>
                       </div>
+
                       <button 
                         type="submit"
-                        className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-2xl transition-all"
+                        className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-2xl transition-all cursor-pointer shadow-lg shadow-blue-600/20"
                       >
                         CRIAR USUÁRIO NO BANCO
                       </button>
@@ -3358,10 +3944,10 @@ ${rowsXml}
               <div className="lg:col-span-2">
                 <div className="bg-zinc-900 border border-white/10 rounded-3xl overflow-hidden">
                   <div className="px-8 py-5 bg-white/5 border-b border-white/10 flex justify-between items-center">
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Usuários Cadastrados no Supabase</h3>
+                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Usuários Cadastrados</h3>
                     <button 
                       onClick={fetchUsers}
-                      className="p-2 text-slate-400 hover:text-white transition-colors"
+                      className="p-2 text-slate-400 hover:text-white transition-colors cursor-pointer"
                     >
                       <RefreshCw size={16} className={isLoadingUsers ? 'animate-spin' : ''} />
                     </button>
@@ -3388,18 +3974,49 @@ ${rowsXml}
                           <td className="px-4 py-3 text-sm font-bold text-white">{user.name}</td>
                           <td className="px-4 py-3 text-sm text-slate-400">{user.email}</td>
                           <td className="px-4 py-3">
-                            <span className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-lg ${user.isAdmin ? 'bg-emerald-500/20 text-emerald-400' : 'bg-zinc-800 text-slate-400'}`}>
-                              {user.isAdmin ? 'Admin' : 'Operador'}
-                            </span>
+                            {user.role === 'admin' || user.isAdmin ? (
+                              <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                Admin
+                              </span>
+                            ) : user.role === 'usuario' ? (
+                              <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                                Usuário
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-400 border border-blue-500/30">
+                                Operador
+                              </span>
+                            )}
                           </td>
-                          <td className="px-4 py-3 text-sm font-mono text-slate-500">{user.password}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-xs text-slate-400 tracking-widest">••••••••</span>
+                              <span className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 uppercase tracking-wider">
+                                <ShieldCheck size={10} />
+                                SHA-256
+                              </span>
+                            </div>
+                          </td>
                           <td className="px-4 py-3 text-right">
-                            <button 
-                              onClick={() => handleDeleteUser(user.email)}
-                              className="text-slate-600 hover:text-red-400 transition-colors p-2"
-                            >
-                              <Trash2 size={18} />
-                            </button>
+                            <div className="flex items-center justify-end gap-1">
+                              <button 
+                                onClick={() => {
+                                  setResettingUserEmail(user.email);
+                                  setNewPasswordForUser('');
+                                }}
+                                className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-400/10 rounded-lg transition-all cursor-pointer"
+                                title="Redefinir Senha (Criptografia SHA-256)"
+                              >
+                                <Key size={15} />
+                              </button>
+                              <button 
+                                onClick={() => handleDeleteUser(user.email)}
+                                className="text-slate-600 hover:text-red-400 transition-colors p-1.5 hover:bg-red-500/10 rounded-lg cursor-pointer"
+                                title="Excluir Usuário"
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -3410,6 +4027,308 @@ ${rowsXml}
                           </td>
                         </tr>
                       )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </motion.div>
+          ) : adminTab === 'access_logs' ? (
+            <motion.div 
+              key="access-logs-tab"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-6"
+            >
+              {/* Header do Controle de Acessos com KPIs */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-zinc-900 border border-white/10 rounded-2xl p-5 shadow-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Total de Logins</span>
+                    <Clock size={16} className="text-blue-400" />
+                  </div>
+                  <p className="text-2xl font-black text-white">{accessLogs.length}</p>
+                  <span className="text-[10px] text-slate-500 mt-1 block">Acessos auditados no sistema</span>
+                </div>
+
+                <div className="bg-zinc-900 border border-white/10 rounded-2xl p-5 shadow-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Acessos Autorizados</span>
+                    <CheckCircle2 size={16} className="text-emerald-400" />
+                  </div>
+                  <p className="text-2xl font-black text-emerald-400">{accessLogs.filter(l => l.status === 'sucesso').length}</p>
+                  <span className="text-[10px] text-slate-500 mt-1 block">Autenticações válidas</span>
+                </div>
+
+                <div className="bg-zinc-900 border border-white/10 rounded-2xl p-5 shadow-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Tentativas Inválidas</span>
+                    <AlertTriangle size={16} className="text-red-400" />
+                  </div>
+                  <p className="text-2xl font-black text-red-400">{accessLogs.filter(l => l.status === 'falha').length}</p>
+                  <span className="text-[10px] text-slate-500 mt-1 block">Senha incorreta ou usuário inexistente</span>
+                </div>
+
+                <div className="bg-gradient-to-br from-indigo-950/40 to-emerald-950/30 border border-emerald-500/30 rounded-2xl p-5 shadow-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest">Criptografia Ativa</span>
+                    <ShieldCheck size={16} className="text-emerald-400" />
+                  </div>
+                  <p className="text-base font-bold text-white flex items-center gap-1.5">
+                    SHA-256 + Salt
+                  </p>
+                  <span className="text-[10px] text-emerald-300/80 mt-1 block">Senhas protegidas e irreversíveis</span>
+                </div>
+              </div>
+
+              {/* Filtros e Barra de Ações de Auditoria */}
+              <div className="bg-zinc-900 border border-white/10 rounded-3xl p-6 shadow-2xl">
+                <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 pb-6 border-b border-white/10">
+                  <div className="flex-1 relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                      <Search size={16} />
+                    </div>
+                    <input 
+                      type="text"
+                      value={accessLogSearch}
+                      onChange={(e) => setAccessLogSearch(e.target.value)}
+                      placeholder="Pesquisar por colaborador ou e-mail..."
+                      className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Perfil:</span>
+                      <select 
+                        value={accessLogFilterRole}
+                        onChange={(e: any) => setAccessLogFilterRole(e.target.value)}
+                        className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-3 py-2 cursor-pointer focus:outline-none"
+                      >
+                        <option value="todos">Todos os Perfis</option>
+                        <option value="admin">ADMIN</option>
+                        <option value="operador">OPERADOR</option>
+                        <option value="usuario">USUÁRIO</option>
+                      </select>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Status:</span>
+                      <select 
+                        value={accessLogFilterStatus}
+                        onChange={(e: any) => setAccessLogFilterStatus(e.target.value)}
+                        className="bg-zinc-800 border border-white/10 text-white text-xs font-bold rounded-xl px-3 py-2 cursor-pointer focus:outline-none"
+                      >
+                        <option value="todos">Todos</option>
+                        <option value="sucesso">Sucesso</option>
+                        <option value="falha">Falhas</option>
+                      </select>
+                    </div>
+
+                    <button 
+                      onClick={fetchAccessLogs}
+                      disabled={isLoadingAccessLogs}
+                      className="p-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-slate-300 hover:text-white transition-all cursor-pointer border border-white/10"
+                      title="Atualizar registros de acesso"
+                    >
+                      <RefreshCw size={14} className={isLoadingAccessLogs ? 'animate-spin' : ''} />
+                    </button>
+
+                    <button 
+                      onClick={() => {
+                        const filtered = accessLogs.filter(l => {
+                          const matchesSearch = !accessLogSearch || 
+                            l.user_name.toLowerCase().includes(accessLogSearch.toLowerCase()) || 
+                            l.user_email.toLowerCase().includes(accessLogSearch.toLowerCase());
+                          const matchesRole = accessLogFilterRole === 'todos' || l.user_role === accessLogFilterRole;
+                          const matchesStatus = accessLogFilterStatus === 'todos' || l.status === accessLogFilterStatus;
+                          return matchesSearch && matchesRole && matchesStatus;
+                        });
+                        const headers = "ID;USUÁRIO;E-MAIL;PERFIL;DATA;HORÁRIO;DISPOSITIVO;STATUS\n";
+                        const rows = filtered.map(l => {
+                          const dt = new Date(l.login_at);
+                          const dateStr = dt.toLocaleDateString('pt-BR');
+                          const timeStr = dt.toLocaleTimeString('pt-BR');
+                          return `"${l.id}";"${l.user_name}";"${l.user_email}";"${String(l.user_role).toUpperCase()}";"${dateStr}";"${timeStr}";"${l.device_info}";"${l.status.toUpperCase()}"`;
+                        }).join("\n");
+                        const blob = new Blob(["\uFEFF" + headers + rows], { type: 'text/csv;charset=utf-8;' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `oee_controle_acessos_${new Date().toISOString().slice(0, 10)}.csv`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                      }}
+                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 text-xs font-bold transition-all cursor-pointer"
+                      title="Exportar registros filtrados em CSV"
+                    >
+                      <Download size={13} />
+                      Exportar CSV
+                    </button>
+
+                    <button 
+                      onClick={() => {
+                        if (confirm('Deseja realmente limpar o histórico local de registros de acesso?')) {
+                          localStorage.removeItem('oee_access_logs');
+                          setAccessLogs([]);
+                        }
+                      }}
+                      className="p-2.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 transition-all cursor-pointer"
+                      title="Limpar histórico de acessos"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Tabela de Auditoria de Acessos */}
+                <div className="overflow-x-auto mt-6">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-white/5 border-b border-white/10">
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Colaborador / E-mail</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Perfil</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Data do Login</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Horário do Login</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">Dispositivo</th>
+                        <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/10">
+                      {(() => {
+                        const filtered = accessLogs.filter(l => {
+                          const matchesSearch = !accessLogSearch || 
+                            l.user_name.toLowerCase().includes(accessLogSearch.toLowerCase()) || 
+                            l.user_email.toLowerCase().includes(accessLogSearch.toLowerCase());
+                          const matchesRole = accessLogFilterRole === 'todos' || l.user_role === accessLogFilterRole;
+                          const matchesStatus = accessLogFilterStatus === 'todos' || l.status === accessLogFilterStatus;
+                          return matchesSearch && matchesRole && matchesStatus;
+                        });
+
+                        if (isLoadingAccessLogs) {
+                          return (
+                            <tr>
+                              <td colSpan={6} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                                Carregando histórico de acessos...
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        if (filtered.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={6} className="px-8 py-10 text-center text-slate-500 text-sm italic">
+                                Nenhum registro de login encontrado com os filtros selecionados.
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        return filtered.map((log) => {
+                          const loginDate = new Date(log.login_at);
+                          const dateFormatted = !isNaN(loginDate.getTime()) ? loginDate.toLocaleDateString('pt-BR') : '-';
+                          const timeFormatted = !isNaN(loginDate.getTime()) ? loginDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
+                          
+                          // Tempo decorrido relativo
+                          const now = Date.now();
+                          const diffMs = now - loginDate.getTime();
+                          const diffMins = Math.floor(diffMs / (1000 * 60));
+                          const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+                          const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                          const relativeTime = diffMins < 1 
+                            ? 'agora mesmo' 
+                            : diffMins < 60 
+                            ? `há ${diffMins} min` 
+                            : diffHours < 24 
+                            ? `há ${diffHours}h` 
+                            : `há ${diffDays} dia(s)`;
+
+                          const isMobile = log.device_info.toLowerCase().includes('mobile') || log.device_info.toLowerCase().includes('smartphone');
+
+                          return (
+                            <tr key={log.id} className="hover:bg-white/5 transition-colors">
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-3">
+                                  <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${
+                                    log.status === 'falha' 
+                                      ? 'bg-red-500/20 text-red-400' 
+                                      : log.user_role === 'admin' 
+                                      ? 'bg-emerald-500/20 text-emerald-400' 
+                                      : log.user_role === 'usuario' 
+                                      ? 'bg-purple-500/20 text-purple-400' 
+                                      : 'bg-blue-500/20 text-blue-400'
+                                  }`}>
+                                    {log.user_name ? log.user_name[0].toUpperCase() : '?'}
+                                  </div>
+                                  <div>
+                                    <p className="text-sm font-bold text-white leading-tight">{log.user_name}</p>
+                                    <p className="text-xs text-slate-400 font-mono">{log.user_email}</p>
+                                  </div>
+                                </div>
+                              </td>
+
+                              <td className="px-4 py-3">
+                                {log.user_role === 'admin' ? (
+                                  <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                    ADMIN
+                                  </span>
+                                ) : log.user_role === 'usuario' ? (
+                                  <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                                    USUÁRIO
+                                  </span>
+                                ) : log.user_role === 'operador' ? (
+                                  <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-400 border border-blue-500/30">
+                                    OPERADOR
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-zinc-800 text-slate-500">
+                                    {log.user_role}
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                                  <Calendar size={13} className="text-slate-400" />
+                                  <span>{dateFormatted}</span>
+                                </div>
+                              </td>
+
+                              <td className="px-4 py-3">
+                                <div>
+                                  <div className="flex items-center gap-1.5 text-xs font-bold text-white">
+                                    <Clock size={13} className="text-blue-400" />
+                                    <span>{timeFormatted}</span>
+                                  </div>
+                                  <span className="text-[10px] text-slate-500 font-mono mt-0.5 block">{relativeTime}</span>
+                                </div>
+                              </td>
+
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-1.5 text-xs text-slate-300">
+                                  {isMobile ? <Smartphone size={14} className="text-amber-400 shrink-0" /> : <Laptop size={14} className="text-indigo-400 shrink-0" />}
+                                  <span className="truncate max-w-[140px]" title={log.device_info}>{log.device_info}</span>
+                                </div>
+                              </td>
+
+                              <td className="px-4 py-3 text-right">
+                                {log.status === 'sucesso' ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                    <CheckCircle2 size={11} />
+                                    Sucesso
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-red-500/20 text-red-400 border border-red-500/30">
+                                    <AlertTriangle size={11} />
+                                    Falha
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        });
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -3779,7 +4698,7 @@ ${rowsXml}
                               Apenas contas com perfil <strong>ADMIN</strong> possuem permissão para exportar os dados brutos e confidenciais do sistema.
                             </p>
                           </div>
-                          <span className="text-[10px] text-slate-500 font-mono mt-4 block">Permissão: currentUser.isAdmin === true</span>
+                          <span className="text-[10px] text-slate-500 font-mono mt-4 block">Permissão: Perfil ADMIN</span>
                         </div>
                       </div>
 
@@ -3821,18 +4740,20 @@ ${rowsXml}
                     </p>
                   </div>
 
-                  {/* Botão ONE PAGE REPORT & Seletor de Modo */}
+                  {/* Botão ONE PAGE REPORT (Apenas Admin) & Seletor de Modo */}
                   <div className="flex flex-wrap items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setShowOnePageReport(true)}
-                      className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/20 border border-emerald-400/30 transition-all cursor-pointer"
-                      title="Gerar Relatório Gerencial ONE PAGE REPORT em 1 página no formato Paisagem"
-                    >
-                      <FileText size={16} />
-                      <span>One Page Report (OPR)</span>
-                      <span className="text-[9px] bg-black/30 px-1.5 py-0.5 rounded-md font-mono uppercase">PDF</span>
-                    </button>
+                    {isUserAdmin(currentUser) && (
+                      <button
+                        type="button"
+                        onClick={() => setShowOnePageReport(true)}
+                        className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/20 border border-emerald-400/30 transition-all cursor-pointer"
+                        title="Gerar Relatório Gerencial ONE PAGE REPORT em 1 página no formato Paisagem"
+                      >
+                        <FileText size={16} />
+                        <span>One Page Report (OPR)</span>
+                        <span className="text-[9px] bg-black/30 px-1.5 py-0.5 rounded-md font-mono uppercase">PDF</span>
+                      </button>
+                    )}
 
                     {/* Switcher DIA / MÊS */}
                     <div className="flex bg-zinc-800/80 p-1 rounded-2xl border border-white/10">
@@ -3960,15 +4881,17 @@ ${rowsXml}
                           Consolidação de {new Date(parseInt(dashboardMonth.split('-')[0]), parseInt(dashboardMonth.split('-')[1]) - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase()}
                         </p>
                       </div>
-                      <div className="flex items-center gap-3">
-                        <button 
-                          onClick={() => setShowOnePageReport(true)}
-                          className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-lg shadow-emerald-600/20"
-                        >
-                          <FileText size={14} />
-                          Gerar One Page Report
-                        </button>
-                      </div>
+                      {isUserAdmin(currentUser) && (
+                        <div className="flex items-center gap-3">
+                          <button 
+                            onClick={() => setShowOnePageReport(true)}
+                            className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-2xl text-xs font-bold transition-all shadow-lg shadow-emerald-600/20 cursor-pointer"
+                          >
+                            <FileText size={14} />
+                            Gerar One Page Report
+                          </button>
+                        </div>
+                      )}
                     </header>
 
                     {/* KPI Cards Mensais */}
@@ -4139,23 +5062,25 @@ ${rowsXml}
                       <h2 className="text-3xl font-bold tracking-tight text-white">Monitoramento de Eficiência</h2>
                       <p className="text-slate-400 mt-1">Dados salvos em {new Date(dashboardRecord.created_at).toLocaleDateString('pt-BR')} às {new Date(dashboardRecord.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</p>
                     </div>
-                    <div className="flex items-center gap-4">
-                      <button 
-                        onClick={() => handleDownloadReport(dashboardData?.inputs, dashboardData?.results)}
-                        className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10 cursor-pointer"
-                      >
-                        <Download size={14} />
-                        Download Relatório
-                      </button>
-                      <button 
-                        onClick={generateAIAnalysis}
-                        disabled={isAnalyzing}
-                        className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-600/20 cursor-pointer"
-                      >
-                        {isAnalyzing ? <RefreshCw size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                        {isAnalyzing ? 'Analisando...' : 'Gerar Insight IA'}
-                      </button>
-                    </div>
+                    {isUserAdmin(currentUser) && (
+                      <div className="flex items-center gap-4">
+                        <button 
+                          onClick={() => handleDownloadReport(dashboardData?.inputs, dashboardData?.results)}
+                          className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-2 rounded-full text-xs font-bold transition-all border border-white/10 cursor-pointer"
+                        >
+                          <Download size={14} />
+                          Download Relatório
+                        </button>
+                        <button 
+                          onClick={generateAIAnalysis}
+                          disabled={isAnalyzing}
+                          className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-4 py-2 rounded-full text-xs font-bold transition-all shadow-lg shadow-indigo-600/20 cursor-pointer"
+                        >
+                          {isAnalyzing ? <RefreshCw size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                          {isAnalyzing ? 'Analisando...' : 'Gerar Insight IA'}
+                        </button>
+                      </div>
+                    )}
                   </header>
 
                   {/* KPI Cards */}
@@ -4361,19 +5286,21 @@ ${rowsXml}
                   <p className="text-slate-400 max-w-md text-center">
                     Não encontramos dados salvos para a <strong>{dashboardLine}</strong> na data <strong>{dashboardDate.split('-').reverse().join('/')}</strong>.
                   </p>
-                  <button 
-                    onClick={() => setActiveTab('inputs')}
-                    className="mt-8 text-blue-400 hover:text-blue-300 font-bold flex items-center gap-2 transition-colors"
-                  >
-                    Ir para Preenchimento de Dados
-                    <ArrowRight size={16} />
-                  </button>
+                  {canUserEdit(currentUser) && (
+                    <button 
+                      onClick={() => setActiveTab('inputs')}
+                      className="mt-8 text-blue-400 hover:text-blue-300 font-bold flex items-center gap-2 transition-colors cursor-pointer"
+                    >
+                      Ir para Preenchimento de Dados
+                      <ArrowRight size={16} />
+                    </button>
+                  )}
                 </div>
               )}
 
-                {/* AI Analysis Section */}
+                {/* AI Analysis Section (Apenas Admin) */}
                 <AnimatePresence>
-                  {(aiAnalysis || isAnalyzing) && (
+                  {isUserAdmin(currentUser) && (aiAnalysis || isAnalyzing) && (
                     <motion.div 
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
@@ -4865,7 +5792,7 @@ ${rowsXml}
                     </span>
                   </div>
 
-                  {currentUser.isAdmin && (
+                  {isUserAdmin(currentUser) && (
                     <button
                       type="button"
                       onClick={() => exportToExcelHandler('filtered')}
@@ -4965,24 +5892,26 @@ ${rowsXml}
                             </td>
                             <td className="px-3 py-3 text-right">
                               <div className="flex items-center justify-end gap-1">
-                                <button 
-                                  onClick={() => handleEditRecord(record)}
-                                  className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-400/10 rounded-lg transition-all"
-                                  title="Corrigir Apontamento"
-                                >
-                                  <Pencil size={14} />
-                                </button>
+                                {canUserEdit(currentUser) && (
+                                  <button 
+                                    onClick={() => handleEditRecord(record)}
+                                    className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-400/10 rounded-lg transition-all cursor-pointer"
+                                    title="Corrigir Apontamento"
+                                  >
+                                    <Pencil size={14} />
+                                  </button>
+                                )}
                                 <button 
                                   onClick={() => setSelectedRecord(record)}
-                                  className="p-1.5 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all"
+                                  className="p-1.5 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all cursor-pointer"
                                   title="Visualizar Detalhes"
                                 >
                                   <Search size={14} />
                                 </button>
-                                {currentUser.isAdmin && (
+                                {isUserAdmin(currentUser) && (
                                   <button 
                                     onClick={() => deleteRecord(record.id)}
-                                    className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all"
+                                    className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-all cursor-pointer"
                                     title="Excluir Registro"
                                   >
                                     <Trash2 size={14} />
@@ -5004,7 +5933,7 @@ ${rowsXml}
                 </div>
               </div>
             </motion.div>
-          ) : activeTab === 'inputs' ? (
+          ) : activeTab === 'inputs' && canUserEdit(currentUser) ? (
             <motion.div 
               key="inputs"
               initial={{ opacity: 0, x: 20 }}
@@ -5705,9 +6634,9 @@ ${rowsXml}
           ) : null}
         </AnimatePresence>
 
-        {/* MODAL ONE PAGE REPORT (OPR) NO FORMATO PAISAGEM */}
+        {/* MODAL ONE PAGE REPORT (OPR) NO FORMATO PAISAGEM (Apenas Admin) */}
         <AnimatePresence>
-          {showOnePageReport && (
+          {showOnePageReport && isUserAdmin(currentUser) && (
             <div className="fixed inset-0 z-[120] flex items-center justify-center p-2 sm:p-4 bg-black/75 backdrop-blur-sm overflow-y-auto">
               <motion.div 
                 initial={{ opacity: 0, scale: 0.96 }}
@@ -5745,12 +6674,12 @@ ${rowsXml}
 
                     <button
                       type="button"
-                      onClick={() => window.print()}
+                      onClick={printOnePageReport}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold transition-all border border-slate-300 shadow-sm cursor-pointer"
-                      title="Imprimir diretamente em folha A4 Paisagem"
+                      title="Imprimir diretamente em folha A4 Paisagem (1 página exata)"
                     >
                       <Printer size={13} />
-                      <span className="hidden sm:inline">Imprimir</span>
+                      <span className="hidden sm:inline">Imprimir (1 Página)</span>
                     </button>
 
                     <button
@@ -5795,32 +6724,50 @@ ${rowsXml}
                 {/* Print CSS Rules */}
                 <style>{`
                   @media print {
-                    body * {
-                      visibility: hidden !important;
+                    @page {
+                      size: A4 landscape;
+                      margin: 4mm 6mm;
                     }
-                    #opr-printable-report, #opr-printable-report * {
-                      visibility: visible !important;
+                    html, body {
+                      width: 100% !important;
+                      height: 100% !important;
+                      max-height: 100% !important;
+                      margin: 0 !important;
+                      padding: 0 !important;
+                      background: #ffffff !important;
+                      overflow: hidden !important;
+                      -webkit-print-color-adjust: exact !important;
+                      print-color-adjust: exact !important;
+                    }
+                    body > * {
+                      display: none !important;
+                    }
+                    /* Exibe apenas o modal ativo sem duplicação de páginas */
+                    .fixed.inset-0.z-\\[120\\] {
+                      display: block !important;
+                      position: static !important;
+                      inset: auto !important;
+                      width: 100% !important;
+                      height: 100% !important;
+                      padding: 0 !important;
+                      margin: 0 !important;
+                      background: #ffffff !important;
+                      overflow: hidden !important;
                     }
                     #opr-printable-report {
-                      position: fixed !important;
-                      left: 0 !important;
-                      top: 0 !important;
-                      width: 297mm !important;
-                      height: 210mm !important;
-                      max-width: 297mm !important;
-                      max-height: 210mm !important;
-                      padding: 8mm 10mm !important;
+                      position: static !important;
+                      width: 100% !important;
+                      max-width: 100% !important;
+                      height: auto !important;
                       margin: 0 !important;
+                      padding: 0 !important;
                       box-shadow: none !important;
                       border: none !important;
                       background: #ffffff !important;
                       color: #0f172a !important;
                       page-break-after: avoid !important;
                       page-break-inside: avoid !important;
-                    }
-                    @page {
-                      size: landscape;
-                      margin: 0mm;
+                      break-inside: avoid !important;
                     }
                   }
                 `}</style>
@@ -6140,6 +7087,88 @@ ${rowsXml}
                 }
               }}
             />
+          )}
+        </AnimatePresence>
+
+        {/* Modal de Redefinição de Senha com Criptografia SHA-256 */}
+        <AnimatePresence>
+          {resettingUserEmail && (
+            <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-zinc-900 w-full max-w-md rounded-3xl border border-white/10 shadow-2xl p-6 relative flex flex-col"
+              >
+                <div className="flex items-start justify-between mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-amber-400">
+                      <Key size={22} />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-white">Redefinir Senha</h3>
+                      <p className="text-xs text-slate-400 font-mono">{resettingUserEmail}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setResettingUserEmail(null);
+                      setNewPasswordForUser('');
+                    }}
+                    className="p-1.5 text-slate-400 hover:text-white hover:bg-white/5 rounded-xl transition-colors cursor-pointer"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+
+                <div className="space-y-4 my-2">
+                  <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center gap-2.5 text-emerald-400 text-xs">
+                    <ShieldCheck size={16} className="shrink-0" />
+                    <span>A nova senha será salva protegida com <strong>criptografia SHA-256 + salt de segurança</strong>.</span>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-400 block mb-1.5">
+                      Nova Senha
+                    </label>
+                    <input
+                      type="password"
+                      placeholder="Digite a nova senha segura..."
+                      value={newPasswordForUser}
+                      onChange={(e) => setNewPasswordForUser(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          handleResetPassword(resettingUserEmail, newPasswordForUser);
+                        }
+                      }}
+                      className="w-full bg-black/60 border border-white/15 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-amber-400 transition-colors"
+                      autoFocus
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-3 mt-6 pt-4 border-t border-white/10">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResettingUserEmail(null);
+                      setNewPasswordForUser('');
+                    }}
+                    className="px-4 py-2 text-xs font-bold text-slate-400 hover:text-white hover:bg-white/5 rounded-xl transition-colors cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleResetPassword(resettingUserEmail, newPasswordForUser)}
+                    className="px-5 py-2.5 text-xs font-bold bg-amber-500 hover:bg-amber-400 text-zinc-950 rounded-xl transition-all shadow-lg shadow-amber-500/20 flex items-center gap-2 cursor-pointer"
+                  >
+                    <Lock size={14} />
+                    Salvar com Criptografia
+                  </button>
+                </div>
+              </motion.div>
+            </div>
           )}
         </AnimatePresence>
       </main>
