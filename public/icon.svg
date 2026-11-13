@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#090d16"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+    <linearGradient id="arcGrad" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="60%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+  <rect x="14" y="14" width="484" height="484" rx="100" fill="none" stroke="#1e293b" stroke-width="6"/>
+  <!-- Gauge Track -->
+  <path d="M 122 330 A 152 152 0 1 1 390 330" fill="none" stroke="#1e293b" stroke-width="34" stroke-linecap="round"/>
+  <!-- Active OEE Gauge Arc -->
+  <path d="M 122 330 A 152 152 0 1 1 372 175" fill="none" stroke="url(#arcGrad)" stroke-width="34" stroke-linecap="round"/>
+  <!-- Center Monogram -->
+  <text x="256" y="274" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="900" font-size="112" fill="#ffffff" letter-spacing="-4">OG</text>
+  <text x="256" y="348" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="38" fill="#60a5fa" letter-spacing="6">OEE</text>
+  <text x="256" y="422" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="700" font-size="24" fill="#94a3b8" letter-spacing="5">GUIDEWAY</text>
+</svg>

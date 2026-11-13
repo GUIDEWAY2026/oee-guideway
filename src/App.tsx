@@ -56,7 +56,8 @@ import {
   Key,
   UserCheck,
   Laptop,
-  Smartphone
+  Smartphone,
+  ScanFace
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { GoogleGenAI } from "@google/genai";
@@ -67,6 +68,14 @@ import html2canvas from 'html2canvas';
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import { ExecutiveMobileApp } from '@/components/ExecutiveMobileApp';
+import { usePWAInstall } from '@/hooks/usePWAInstall';
+import {
+  BiometricCredentialProfile,
+  authenticateWithBiometricFaceId,
+  detectBiometricPlatform,
+  getEnrolledBiometricProfiles,
+} from '@/lib/biometricAuth';
 
 // Error Boundary Component
 export class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean, error: any}> {
@@ -356,7 +365,7 @@ interface OEEResults {
 }
 
 // Types for Authentication
-export type UserRole = 'admin' | 'operador' | 'usuario';
+export type UserRole = 'admin' | 'operador' | 'usuario' | 'diretoria';
 
 interface User {
   name: string;
@@ -382,9 +391,24 @@ export const isUserViewer = (u: User | null | undefined): boolean => {
   return u.role === 'usuario' && !isUserAdmin(u);
 };
 
+export const isUserDiretoria = (u: User | null | undefined): boolean => {
+  if (!u) return false;
+  return u.role === 'diretoria' && !isUserAdmin(u);
+};
+
 export const canUserEdit = (u: User | null | undefined): boolean => {
   if (!u) return false;
-  return !isUserViewer(u);
+  return !isUserViewer(u) && !isUserDiretoria(u);
+};
+
+export const normalizeUserRole = (rawRole: any, isAdminFlag?: boolean, email?: string): UserRole => {
+  if (rawRole === 'admin' || rawRole === 'operador' || rawRole === 'usuario' || rawRole === 'diretoria') {
+    return rawRole;
+  }
+  if (isAdminFlag || (typeof email === 'string' && email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase())) {
+    return 'admin';
+  }
+  return 'operador';
 };
 
 // =========================================================================
@@ -622,10 +646,29 @@ export default function App() {
   });
   const [isLoadingAccessLogs, setIsLoadingAccessLogs] = useState(false);
   const [accessLogSearch, setAccessLogSearch] = useState('');
-  const [accessLogFilterRole, setAccessLogFilterRole] = useState<'todos' | 'admin' | 'operador' | 'usuario'>('todos');
+  const [accessLogFilterRole, setAccessLogFilterRole] = useState<'todos' | 'admin' | 'operador' | 'usuario' | 'diretoria'>('todos');
   const [accessLogFilterStatus, setAccessLogFilterStatus] = useState<'todos' | 'sucesso' | 'falha'>('todos');
   const [resettingUserEmail, setResettingUserEmail] = useState<string | null>(null);
   const [newPasswordForUser, setNewPasswordForUser] = useState<string>('');
+  const [editingUserOriginalEmail, setEditingUserOriginalEmail] = useState<string | null>(null);
+  const [editUserName, setEditUserName] = useState<string>('');
+  const [editUserEmail, setEditUserEmail] = useState<string>('');
+  const [editUserPassword, setEditUserPassword] = useState<string>('');
+  const [editUserRole, setEditUserRole] = useState<UserRole>('operador');
+  const [editUserError, setEditUserError] = useState<string>('');
+  const [isSavingEditedUser, setIsSavingEditedUser] = useState<boolean>(false);
+  const [showEditPassword, setShowEditPassword] = useState<boolean>(false);
+  const [enrolledBiometrics, setEnrolledBiometrics] = useState<BiometricCredentialProfile[]>(() =>
+    getEnrolledBiometricProfiles()
+  );
+  const [selectedBiometricEmail, setSelectedBiometricEmail] = useState<string>(() => {
+    const list = getEnrolledBiometricProfiles();
+    return list[0]?.userEmail || '';
+  });
+  const [isBiometricLoggingIn, setIsBiometricLoggingIn] = useState(false);
+  const [showLoginHomeGuide, setShowLoginHomeGuide] = useState(false);
+  const { isInstallable: isPWAInstallable, isInstalled: isPWAInstalled, isIOS: isIOSDevice, install: installPWA } = usePWAInstall();
+  const biometricPlatform = useMemo(() => detectBiometricPlatform(), []);
   const [users, setUsers] = useState<User[]>([]);
   const [stopCodes, setStopCodes] = useState<StopCode[]>(DEFAULT_STOP_CODES);
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
@@ -958,11 +1001,7 @@ export default function App() {
       if (useLocalFallback) {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
         setUsers(localUsers.map(u => {
-          const role: UserRole = (u.role === 'usuario' || u.role === 'admin' || u.role === 'operador')
-            ? u.role
-            : (u.is_admin || (u.email && u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()))
-              ? 'admin'
-              : 'operador';
+          const role = normalizeUserRole(u.role, u.is_admin, u.email);
           return {
             name: u.name,
             email: u.email,
@@ -984,13 +1023,7 @@ export default function App() {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
         setUsers(data.map(u => {
           const localMatch = localUsers.find(lu => lu.email.toLowerCase() === u.email.toLowerCase());
-          const role: UserRole = (u.role === 'usuario' || u.role === 'admin' || u.role === 'operador')
-            ? u.role
-            : (localMatch?.role === 'usuario' || localMatch?.role === 'admin' || localMatch?.role === 'operador')
-              ? localMatch.role
-              : (u.is_admin || (u.email && u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()))
-                ? 'admin'
-                : 'operador';
+          const role = normalizeUserRole(u.role || localMatch?.role, u.is_admin, u.email);
           return {
             name: u.name,
             email: u.email,
@@ -1004,11 +1037,7 @@ export default function App() {
       console.error('Erro ao buscar usuários, usando local:', error);
       const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
       setUsers(localUsers.map(u => {
-        const role: UserRole = (u.role === 'usuario' || u.role === 'admin' || u.role === 'operador')
-          ? u.role
-          : (u.is_admin || (u.email && u.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()))
-            ? 'admin'
-            : 'operador';
+        const role = normalizeUserRole(u.role, u.is_admin, u.email);
         return {
           name: u.name,
           email: u.email,
@@ -3039,9 +3068,9 @@ ${rowsXml}
     }
   }, []);
 
-  // Proteção de rota para perfil USUÁRIO (Visualizador apenas: Dashboard, Evolução e Manutenção)
+  // Proteção de rota para perfil USUÁRIO e DIRETORIA EXECUTIVA (Somente consulta)
   useEffect(() => {
-    if (currentUser && currentUser.role === 'usuario') {
+    if (currentUser && (currentUser.role === 'usuario' || currentUser.role === 'diretoria')) {
       if (activeTab === 'inputs') {
         setActiveTab('dashboard');
       }
@@ -3051,12 +3080,20 @@ ${rowsXml}
     }
   }, [currentUser, activeTab, showAdminPanel]);
 
-  // Inicializar dashboard com o último registro quando o usuário logar
+  // Inicializar dados e atualizar lista de biometrias cadastradas
   useEffect(() => {
     if (currentUser) {
       fetchStopCodes(); // Recarrega códigos de parada após autenticação bem-sucedida no Supabase
-      if (activeTab === 'dashboard' && !dashboardRecord) {
+      if (isUserDiretoria(currentUser)) {
+        fetchAllSystemRecords();
+      } else if (activeTab === 'dashboard' && !dashboardRecord) {
         fetchLatestRecord();
+      }
+    } else {
+      const profiles = getEnrolledBiometricProfiles();
+      setEnrolledBiometrics(profiles);
+      if (profiles.length > 0 && !profiles.some(p => p.userEmail === selectedBiometricEmail)) {
+        setSelectedBiometricEmail(profiles[0].userEmail);
       }
     }
   }, [currentUser, activeTab]);
@@ -3129,11 +3166,7 @@ ${rowsXml}
           matched.password = newHashed;
         }
 
-        const role: UserRole = (matched.role === 'usuario' || matched.role === 'admin' || matched.role === 'operador')
-          ? matched.role
-          : (matched.is_admin || matched.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase())
-            ? 'admin'
-            : 'operador';
+        const role = normalizeUserRole(matched.role, matched.is_admin, matched.email);
 
         const user: User = {
           name: matched.name,
@@ -3200,13 +3233,7 @@ ${rowsXml}
 
       const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
       const localMatch = localUsers.find(lu => lu.email.toLowerCase() === cleanEmail.toLowerCase());
-      const role: UserRole = (data.role === 'usuario' || data.role === 'admin' || data.role === 'operador')
-        ? data.role
-        : (localMatch?.role === 'usuario' || localMatch?.role === 'admin' || localMatch?.role === 'operador')
-          ? localMatch.role
-          : (data.is_admin || data.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase())
-            ? 'admin'
-            : 'operador';
+      const role = normalizeUserRole(data.role || localMatch?.role, data.is_admin, data.email);
 
       const user: User = {
         name: data.name,
@@ -3230,6 +3257,75 @@ ${rowsXml}
     } catch (error) {
       console.error('Erro no login:', error);
       setLoginError('Erro de conexão com o banco de dados. Verifique sua conexão de rede.');
+    }
+  };
+
+  // Login via Leitura Facial (Face ID / Android Biometria)
+  const handleBiometricLogin = async () => {
+    setLoginError('');
+    setIsBiometricLoggingIn(true);
+    try {
+      const targetEmail = selectedBiometricEmail || enrolledBiometrics[0]?.userEmail;
+      const authResult = await authenticateWithBiometricFaceId(targetEmail);
+
+      if (!authResult.success || !authResult.profile) {
+        recordAccessLog({
+          user_name: authResult.profile?.userName || 'Leitura Facial Recusada',
+          user_email: targetEmail || 'desconhecido',
+          user_role: authResult.profile?.userRole || 'diretoria',
+          status: 'falha',
+          device_info: `Mobile / ${biometricPlatform.shortLabel}`
+        });
+        setLoginError(authResult.error || 'Falha na autenticação facial.');
+        return;
+      }
+
+      const profile = authResult.profile;
+      let resolvedUser: User = {
+        name: profile.userName,
+        email: profile.userEmail,
+        password: profile.passwordHash,
+        isAdmin: profile.userRole === 'admin',
+        role: normalizeUserRole(profile.userRole, profile.userRole === 'admin', profile.userEmail)
+      };
+
+      // Tenta sincronizar papel atualizado no banco caso online
+      if (!useLocalFallback) {
+        try {
+          const { data } = await supabase
+            .from('users')
+            .select('*')
+            .ilike('email', profile.userEmail)
+            .maybeSingle();
+          if (data) {
+            const role = normalizeUserRole(data.role || profile.userRole, data.is_admin, data.email);
+            resolvedUser = {
+              name: data.name || profile.userName,
+              email: data.email || profile.userEmail,
+              password: data.password || profile.passwordHash,
+              isAdmin: role === 'admin',
+              role
+            };
+          }
+        } catch {
+          // Mantém dados da credencial biométrica vinculada
+        }
+      }
+
+      recordAccessLog({
+        user_name: resolvedUser.name,
+        user_email: resolvedUser.email,
+        user_role: resolvedUser.role,
+        status: 'sucesso',
+        device_info: `Mobile / Leitura Facial (${biometricPlatform.shortLabel})`
+      });
+
+      setCurrentUser(resolvedUser);
+      localStorage.setItem('oee_guide_session', JSON.stringify(resolvedUser));
+    } catch (err: any) {
+      setLoginError(err?.message || 'Erro ao autenticar com Leitura Facial.');
+    } finally {
+      setIsBiometricLoggingIn(false);
     }
   };
 
@@ -3365,6 +3461,173 @@ ${rowsXml}
     } catch (e: any) {
       console.error('Erro ao redefinir senha:', e);
       alert('Erro ao redefinir senha: ' + e.message);
+    }
+  };
+
+  // Abrir modal de edição completa de usuário (Nome, Login/E-mail, Senha e Perfil)
+  const openEditUserModal = (user: User) => {
+    setEditingUserOriginalEmail(user.email);
+    setEditUserName(user.name || '');
+    setEditUserEmail(user.email || '');
+    setEditUserPassword('');
+    setEditUserRole(normalizeUserRole(user.role, user.isAdmin, user.email));
+    setEditUserError('');
+    setShowEditPassword(false);
+  };
+
+  // Salvar alterações de Login, Nome, Senha e Perfil do usuário
+  const handleUpdateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUserOriginalEmail) return;
+    setEditUserError('');
+
+    const trimmedName = editUserName.trim();
+    const trimmedEmail = editUserEmail.trim();
+    const trimmedPassword = editUserPassword.trim();
+
+    if (!trimmedName || !trimmedEmail) {
+      setEditUserError('Nome completo e e-mail (login) são obrigatórios.');
+      return;
+    }
+
+    const isPrimaryAdmin = editingUserOriginalEmail.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase();
+    const resolvedRole: UserRole = isPrimaryAdmin ? 'admin' : editUserRole;
+    const isAdminRole = resolvedRole === 'admin';
+
+    // Verifica duplicidade se o e-mail (login) foi alterado
+    if (trimmedEmail.toLowerCase() !== editingUserOriginalEmail.toLowerCase()) {
+      const duplicate = users.some(
+        u => u.email.toLowerCase() === trimmedEmail.toLowerCase()
+      );
+      if (duplicate) {
+        setEditUserError('Já existe outro usuário cadastrado com este e-mail/login.');
+        return;
+      }
+    }
+
+    setIsSavingEditedUser(true);
+    try {
+      const existingUserObj = users.find(
+        u => u.email.toLowerCase() === editingUserOriginalEmail.toLowerCase()
+      );
+      const updatedPasswordHash = trimmedPassword
+        ? await hashPassword(trimmedPassword)
+        : (existingUserObj?.password || '');
+
+      if (!useLocalFallback) {
+        const updatePayload: any = {
+          name: trimmedName,
+          email: trimmedEmail,
+          is_admin: isAdminRole,
+          role: resolvedRole
+        };
+        if (trimmedPassword) {
+          updatePayload.password = updatedPasswordHash;
+        }
+
+        const { error } = await supabase
+          .from('users')
+          .update(updatePayload)
+          .ilike('email', editingUserOriginalEmail);
+
+        if (error) {
+          if (error.message?.includes('column "role"') || error.code === '42703') {
+            const fallbackPayload: any = {
+              name: trimmedName,
+              email: trimmedEmail,
+              is_admin: isAdminRole
+            };
+            if (trimmedPassword) {
+              fallbackPayload.password = updatedPasswordHash;
+            }
+            const { error: err2 } = await supabase
+              .from('users')
+              .update(fallbackPayload)
+              .ilike('email', editingUserOriginalEmail);
+            if (err2) throw err2;
+          } else {
+            throw error;
+          }
+        }
+      }
+
+      // Sincroniza no localStorage (oee_local_users)
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      const foundLocally = localUsers.some(
+        u => u.email.toLowerCase() === editingUserOriginalEmail.toLowerCase()
+      );
+      let updatedLocalUsers;
+      if (foundLocally) {
+        updatedLocalUsers = localUsers.map(u => {
+          if (u.email.toLowerCase() === editingUserOriginalEmail.toLowerCase()) {
+            return {
+              ...u,
+              name: trimmedName,
+              email: trimmedEmail,
+              password: trimmedPassword ? updatedPasswordHash : u.password,
+              is_admin: isAdminRole,
+              role: resolvedRole
+            };
+          }
+          return u;
+        });
+      } else {
+        updatedLocalUsers = [
+          ...localUsers,
+          {
+            name: trimmedName,
+            email: trimmedEmail,
+            password: updatedPasswordHash,
+            is_admin: isAdminRole,
+            role: resolvedRole
+          }
+        ];
+      }
+      localStorage.setItem('oee_local_users', JSON.stringify(updatedLocalUsers));
+
+      // Sincroniza credencial biométrica (Face ID) se houver cadastro neste dispositivo
+      try {
+        const bioProfiles = getEnrolledBiometricProfiles();
+        const bioIndex = bioProfiles.findIndex(
+          p => p.userEmail.toLowerCase() === editingUserOriginalEmail.toLowerCase()
+        );
+        if (bioIndex > -1) {
+          const updatedBio = [...bioProfiles];
+          updatedBio[bioIndex] = {
+            ...updatedBio[bioIndex],
+            userName: trimmedName,
+            userEmail: trimmedEmail,
+            userRole: resolvedRole,
+            passwordHash: updatedPasswordHash || updatedBio[bioIndex].passwordHash
+          };
+          localStorage.setItem('oee_face_id_profiles', JSON.stringify(updatedBio));
+          setEnrolledBiometrics(updatedBio);
+        }
+      } catch {}
+
+      // Se o admin editou a própria conta logada, atualiza a sessão ativa
+      if (currentUser && currentUser.email.toLowerCase() === editingUserOriginalEmail.toLowerCase()) {
+        const updatedSessionUser: User = {
+          ...currentUser,
+          name: trimmedName,
+          email: trimmedEmail,
+          password: updatedPasswordHash || currentUser.password,
+          isAdmin: isAdminRole,
+          role: resolvedRole
+        };
+        setCurrentUser(updatedSessionUser);
+        localStorage.setItem('oee_guide_session', JSON.stringify(updatedSessionUser));
+      }
+
+      setEditingUserOriginalEmail(null);
+      setEditUserPassword('');
+      fetchUsers();
+      alert(`Dados do usuário "${trimmedName}" atualizados com sucesso!`);
+    } catch (err: any) {
+      console.error('Erro ao atualizar usuário:', err);
+      setEditUserError('Erro ao salvar alterações: ' + (err?.message || 'Falha desconhecida'));
+    } finally {
+      setIsSavingEditedUser(false);
     }
   };
 
@@ -3596,12 +3859,14 @@ ${rowsXml}
   const formatNumber = (val: number) => val.toLocaleString('pt-BR', { maximumFractionDigits: 1 });
 
   if (!currentUser) {
+    const activeBioProfile = enrolledBiometrics.find(p => p.userEmail === selectedBiometricEmail) || enrolledBiometrics[0];
+
     return (
       <div className="min-h-screen bg-black flex items-center justify-center p-4 font-sans">
-        <div className="w-full max-w-md bg-zinc-900 border border-white/10 rounded-3xl shadow-2xl overflow-hidden">
-          <div className="p-10">
-            <div className="flex justify-center mb-10">
-              <div className="flex flex-col items-center gap-4">
+        <div className="w-full max-w-md bg-zinc-950 border border-white/15 rounded-3xl shadow-2xl overflow-hidden">
+          <div className="p-8 sm:p-10">
+            <div className="flex justify-center mb-8">
+              <div className="flex flex-col items-center gap-3">
                 <img 
                   src="https://i.imgur.com/AIrsvfE_d.png?maxwidth=520&shape=thumb&fidelity=high" 
                   alt="Guideway Logo" 
@@ -3612,20 +3877,66 @@ ${rowsXml}
               </div>
             </div>
             
-            <h2 className="text-xl font-semibold text-white mb-4 text-center">Acesso ao Sistema</h2>
-            <div className="flex justify-center mb-8">
+            <h2 className="text-xl font-semibold text-white mb-3 text-center">Acesso ao Sistema</h2>
+            <div className="flex justify-center mb-6">
               {useLocalFallback ? (
-                <span className="text-[10px] font-bold text-amber-500 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20 uppercase tracking-wider">
-                  ⚠️ Modo Demonstrativo (Local)
+                <span className="text-[11px] font-bold text-amber-400 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20">
+                  Modo Demonstrativo (Local)
                 </span>
               ) : (
-                <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20 uppercase tracking-wider">
-                  ⚡ Conectado ao Supabase
+                <span className="text-[11px] font-bold text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20">
+                  Conectado ao Supabase
                 </span>
               )}
             </div>
+
+            {/* LOGIN VIA LEITURA FACIAL (Quando já cadastrado no dispositivo) */}
+            {activeBioProfile && (
+              <div className="mb-6 bg-zinc-900/90 border border-blue-500/35 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
+                      <ScanFace size={22} />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-white truncate">{activeBioProfile.userName}</p>
+                      <p className="text-[11px] text-slate-400 truncate">{activeBioProfile.userEmail}</p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold text-blue-400 shrink-0">
+                    {biometricPlatform.shortLabel}
+                  </span>
+                </div>
+
+                {enrolledBiometrics.length > 1 && (
+                  <select
+                    value={activeBioProfile.userEmail}
+                    onChange={(e) => setSelectedBiometricEmail(e.target.value)}
+                    className="w-full min-h-[40px] bg-black border border-white/15 rounded-xl px-3 text-xs text-white focus:outline-none focus:border-blue-500"
+                  >
+                    {enrolledBiometrics.map((p) => (
+                      <option key={p.userEmail} value={p.userEmail}>
+                        {p.userName} ({p.userEmail})
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleBiometricLogin}
+                  disabled={isBiometricLoggingIn}
+                  className="w-full min-h-[48px] bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-60 text-white font-bold text-sm rounded-xl flex items-center justify-center gap-2.5 shadow-lg shadow-blue-600/25 active:scale-[0.98] transition-all cursor-pointer"
+                >
+                  <ScanFace size={20} className={isBiometricLoggingIn ? 'animate-pulse' : ''} />
+                  {isBiometricLoggingIn
+                    ? 'Verificando Leitura Facial...'
+                    : `Entrar com ${biometricPlatform.shortLabel}`}
+                </button>
+              </div>
+            )}
             
-            <form onSubmit={handleLogin} className="space-y-5 flex flex-col">
+            <form onSubmit={handleLogin} className="space-y-4 flex flex-col">
               <div>
                 <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">E-mail</label>
                 <input 
@@ -3657,17 +3968,72 @@ ${rowsXml}
               
               <button 
                 type="submit"
-                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-5 rounded-2xl shadow-lg shadow-blue-600/20 transition-all active:scale-95 mt-4"
+                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-2xl shadow-lg shadow-blue-600/20 transition-all active:scale-95 mt-2 cursor-pointer"
               >
                 ENTRAR NO SISTEMA
               </button>
             </form>
+
+            {/* Botão para Adicionar Ícone do APP na Tela de Início (iPhone / Android) */}
+            {!isPWAInstalled && (
+              <div className="mt-6 pt-5 border-t border-white/10">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isPWAInstallable) {
+                      installPWA();
+                    } else {
+                      setShowLoginHomeGuide(prev => !prev);
+                    }
+                  }}
+                  className="w-full min-h-[44px] bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl px-4 py-2.5 flex items-center justify-between gap-3 text-left transition-all cursor-pointer"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <img src="/pwa-192x192.png" alt="Ícone OEE Guideway" className="w-8 h-8 rounded-lg border border-white/15 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-white truncate">Adicionar Ícone na Tela Inicial</p>
+                      <p className="text-[11px] text-slate-400 truncate">
+                        {isIOSDevice ? 'iPhone (Safari)' : 'Celular Android / iPhone'}
+                      </p>
+                    </div>
+                  </div>
+                  <Smartphone size={17} className="text-blue-400 shrink-0" />
+                </button>
+
+                {showLoginHomeGuide && (
+                  <div className="mt-3 bg-zinc-900 border border-white/10 rounded-2xl p-3.5 text-xs text-slate-300 space-y-1.5 leading-relaxed">
+                    <p className="font-bold text-white">Como incluir o ícone na tela inicial:</p>
+                    <p>• <strong>iPhone (Safari):</strong> Toque em <strong>Compartilhar</strong> e depois em <strong>Adicionar à Tela de Início</strong>.</p>
+                    <p>• <strong>Android (Chrome):</strong> Toque no menu <strong>⋮</strong> e em <strong>Adicionar à tela inicial</strong>.</p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <div className="bg-white/5 p-5 text-center border-t border-white/5">
-            <p className="text-slate-500 text-[10px] uppercase tracking-widest">© 2024 OEE GUIDEWAY - Inteligência Industrial</p>
+            <p className="text-slate-500 text-[10px] uppercase tracking-widest">© 2026 OEE GUIDEWAY - Inteligência Industrial</p>
           </div>
         </div>
       </div>
+    );
+  }
+
+  // Direcionamento automático exclusivo para o perfil DIRETORIA EXECUTIVA -> App Mobile (Fundo Preto)
+  if (isUserDiretoria(currentUser)) {
+    return (
+      <ErrorBoundary>
+        <ExecutiveMobileApp
+          currentUser={currentUser}
+          allSystemRecords={allSystemRecords}
+          isLoadingRecords={isLoadingAllRecords}
+          productionLines={PRODUCTION_LINES}
+          stopCodes={stopCodes}
+          calculateOEEResults={calculateOEEResults}
+          getOEEColorInfo={getOEEColorInfo}
+          onRefresh={fetchAllSystemRecords}
+          onLogout={handleLogout}
+        />
+      </ErrorBoundary>
     );
   }
 
@@ -3759,7 +4125,13 @@ ${rowsXml}
             <div className="overflow-hidden">
               <p className="text-xs font-bold text-white truncate">{currentUser.name}</p>
               <p className="text-[10px] text-slate-500 uppercase tracking-widest">
-                {isUserAdmin(currentUser) ? 'Admin' : currentUser.role === 'usuario' ? 'Usuário (Visualizador)' : 'Operador'}
+                {isUserAdmin(currentUser)
+                  ? 'Admin'
+                  : currentUser.role === 'diretoria'
+                  ? 'Diretoria Executiva'
+                  : currentUser.role === 'usuario'
+                  ? 'Usuário (Visualizador)'
+                  : 'Operador'}
               </p>
             </div>
           </div>
@@ -3928,6 +4300,26 @@ ${rowsXml}
                               </p>
                             </div>
                           </label>
+
+                          <label className={`flex items-start gap-3 p-3 rounded-2xl border transition-all cursor-pointer ${newUserRole === 'diretoria' ? 'bg-amber-500/10 border-amber-500/40 text-white' : 'bg-white/5 border-white/5 text-slate-400 hover:bg-white/10'}`}>
+                            <input 
+                              type="radio" 
+                              name="newUserRole" 
+                              value="diretoria"
+                              checked={newUserRole === 'diretoria'}
+                              onChange={() => setNewUserRole('diretoria')}
+                              className="mt-1 text-amber-500 focus:ring-amber-500/50"
+                            />
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-xs font-bold text-amber-400">DIRETORIA EXECUTIVA</span>
+                                <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-mono uppercase">App Mobile · Consulta</span>
+                              </div>
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                Direciona automaticamente para o App Mobile em fundo preto, com filtros em lista suspensa (dia, mês, período, ano), leitura facial e ícone na tela inicial.
+                              </p>
+                            </div>
+                          </label>
                         </div>
                       </div>
 
@@ -3978,6 +4370,10 @@ ${rowsXml}
                               <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                                 Admin
                               </span>
+                            ) : user.role === 'diretoria' ? (
+                              <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                                Diretoria Exec.
+                              </span>
                             ) : user.role === 'usuario' ? (
                               <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-purple-500/20 text-purple-400 border border-purple-500/30">
                                 Usuário
@@ -3999,6 +4395,13 @@ ${rowsXml}
                           </td>
                           <td className="px-4 py-3 text-right">
                             <div className="flex items-center justify-end gap-1">
+                              <button 
+                                onClick={() => openEditUserModal(user)}
+                                className="p-1.5 text-slate-400 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-all cursor-pointer"
+                                title="Editar Usuário (Nome, Login, Senha e Perfil)"
+                              >
+                                <Pencil size={15} />
+                              </button>
                               <button 
                                 onClick={() => {
                                   setResettingUserEmail(user.email);
@@ -4107,6 +4510,7 @@ ${rowsXml}
                       >
                         <option value="todos">Todos os Perfis</option>
                         <option value="admin">ADMIN</option>
+                        <option value="diretoria">DIRETORIA EXECUTIVA</option>
                         <option value="operador">OPERADOR</option>
                         <option value="usuario">USUÁRIO</option>
                       </select>
@@ -4272,6 +4676,10 @@ ${rowsXml}
                                 {log.user_role === 'admin' ? (
                                   <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                                     ADMIN
+                                  </span>
+                                ) : log.user_role === 'diretoria' ? (
+                                  <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                                    DIRETORIA EXEC.
                                   </span>
                                 ) : log.user_role === 'usuario' ? (
                                   <span className="text-[10px] font-black uppercase px-2.5 py-1 rounded-lg bg-purple-500/20 text-purple-400 border border-purple-500/30">
@@ -7170,6 +7578,229 @@ ${rowsXml}
               </motion.div>
             </div>
           )}
+        </AnimatePresence>
+
+        {/* Modal de Edição Completa de Usuário (Nome, Login, Senha e Perfil) */}
+        <AnimatePresence>
+          {editingUserOriginalEmail && (() => {
+            const targetUser = users.find(u => u.email.toLowerCase() === editingUserOriginalEmail.toLowerCase());
+            const isPrimaryAdminAccount = editingUserOriginalEmail.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase();
+            const lastUserLog = accessLogs.find(
+              l => l.user_email.toLowerCase() === editingUserOriginalEmail.toLowerCase() && l.status === 'sucesso'
+            );
+
+            return (
+              <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  className="bg-zinc-900 w-full max-w-xl max-h-[92vh] overflow-y-auto rounded-3xl border border-white/10 shadow-2xl p-6 relative flex flex-col"
+                >
+                  <div className="flex items-start justify-between mb-5 pb-4 border-b border-white/10">
+                    <div className="flex items-center gap-3">
+                      <div className="p-3 bg-blue-500/10 border border-blue-500/25 rounded-2xl text-blue-400">
+                        <Pencil size={20} />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-white">Editar Usuário Cadastrado</h3>
+                        <p className="text-xs text-slate-400 font-mono">{editingUserOriginalEmail}</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setEditingUserOriginalEmail(null)}
+                      className="p-1.5 text-slate-400 hover:text-white hover:bg-white/5 rounded-xl transition-colors cursor-pointer"
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+
+                  {/* Resumo das Informações Salvas */}
+                  <div className="mb-5 bg-black/50 border border-white/10 rounded-2xl p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Proteção de Senha</span>
+                      <span className="text-emerald-400 font-semibold flex items-center gap-1.5 mt-0.5">
+                        <ShieldCheck size={14} />
+                        {targetUser?.password?.startsWith('sha256:') ? 'Criptografia SHA-256 Ativa' : 'Proteção Padrão'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Último Login Registrado</span>
+                      <span className="text-slate-300 font-medium mt-0.5 block">
+                        {lastUserLog
+                          ? `${new Date(lastUserLog.login_at).toLocaleDateString('pt-BR')} às ${new Date(lastUserLog.login_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
+                          : 'Nenhum login registrado'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <form onSubmit={handleUpdateUser} className="space-y-4">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1.5">
+                        Nome Completo
+                      </label>
+                      <input
+                        type="text"
+                        value={editUserName}
+                        onChange={(e) => setEditUserName(e.target.value)}
+                        className="w-full bg-black/60 border border-white/15 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+                        placeholder="Nome completo do colaborador"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1.5">
+                        Login / E-mail de Acesso
+                      </label>
+                      <input
+                        type="email"
+                        value={editUserEmail}
+                        onChange={(e) => setEditUserEmail(e.target.value)}
+                        className="w-full bg-black/60 border border-white/15 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+                        placeholder="email@empresa.com"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                          Nova Senha (opcional)
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => setShowEditPassword(prev => !prev)}
+                          className="text-[11px] font-semibold text-blue-400 hover:text-blue-300 cursor-pointer"
+                        >
+                          {showEditPassword ? 'Ocultar senha' : 'Mostrar senha'}
+                        </button>
+                      </div>
+                      <input
+                        type={showEditPassword ? 'text' : 'password'}
+                        value={editUserPassword}
+                        onChange={(e) => setEditUserPassword(e.target.value)}
+                        className="w-full bg-black/60 border border-white/15 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+                        placeholder="Deixe em branco para manter a senha atual"
+                      />
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        Ao digitar uma nova senha, ela será automaticamente criptografada com SHA-256 + salt.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">
+                        Perfil de Acesso
+                      </label>
+                      {isPrimaryAdminAccount && (
+                        <p className="text-[11px] text-amber-400 mb-2">
+                          O perfil do Administrador Principal permanece como ADMIN por segurança.
+                        </p>
+                      )}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <label className={`flex items-start gap-2.5 p-3 rounded-2xl border transition-all cursor-pointer ${editUserRole === 'admin' ? 'bg-emerald-500/15 border-emerald-500/50 text-white' : 'bg-black/40 border-white/10 text-slate-400 hover:bg-white/5'}`}>
+                          <input
+                            type="radio"
+                            name="editUserRole"
+                            value="admin"
+                            checked={editUserRole === 'admin'}
+                            onChange={() => setEditUserRole('admin')}
+                            className="mt-0.5 text-emerald-500"
+                          />
+                          <div>
+                            <span className="text-xs font-bold text-emerald-400 block">ADMIN</span>
+                            <span className="text-[10px] text-slate-400 leading-tight block mt-0.5">
+                              Acesso total, OPR, Excel, IA e Gestão
+                            </span>
+                          </div>
+                        </label>
+
+                        <label className={`flex items-start gap-2.5 p-3 rounded-2xl border transition-all ${isPrimaryAdminAccount ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer'} ${editUserRole === 'operador' ? 'bg-blue-500/15 border-blue-500/50 text-white' : 'bg-black/40 border-white/10 text-slate-400 hover:bg-white/5'}`}>
+                          <input
+                            type="radio"
+                            name="editUserRole"
+                            value="operador"
+                            disabled={isPrimaryAdminAccount}
+                            checked={editUserRole === 'operador'}
+                            onChange={() => setEditUserRole('operador')}
+                            className="mt-0.5 text-blue-500"
+                          />
+                          <div>
+                            <span className="text-xs font-bold text-blue-400 block">OPERADOR</span>
+                            <span className="text-[10px] text-slate-400 leading-tight block mt-0.5">
+                              Apontamentos, Edição e Parâmetros
+                            </span>
+                          </div>
+                        </label>
+
+                        <label className={`flex items-start gap-2.5 p-3 rounded-2xl border transition-all ${isPrimaryAdminAccount ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer'} ${editUserRole === 'usuario' ? 'bg-purple-500/15 border-purple-500/50 text-white' : 'bg-black/40 border-white/10 text-slate-400 hover:bg-white/5'}`}>
+                          <input
+                            type="radio"
+                            name="editUserRole"
+                            value="usuario"
+                            disabled={isPrimaryAdminAccount}
+                            checked={editUserRole === 'usuario'}
+                            onChange={() => setEditUserRole('usuario')}
+                            className="mt-0.5 text-purple-500"
+                          />
+                          <div>
+                            <span className="text-xs font-bold text-purple-400 block">USUÁRIO</span>
+                            <span className="text-[10px] text-slate-400 leading-tight block mt-0.5">
+                              Somente Visualização Desktop
+                            </span>
+                          </div>
+                        </label>
+
+                        <label className={`flex items-start gap-2.5 p-3 rounded-2xl border transition-all ${isPrimaryAdminAccount ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer'} ${editUserRole === 'diretoria' ? 'bg-amber-500/15 border-amber-500/50 text-white' : 'bg-black/40 border-white/10 text-slate-400 hover:bg-white/5'}`}>
+                          <input
+                            type="radio"
+                            name="editUserRole"
+                            value="diretoria"
+                            disabled={isPrimaryAdminAccount}
+                            checked={editUserRole === 'diretoria'}
+                            onChange={() => setEditUserRole('diretoria')}
+                            className="mt-0.5 text-amber-500"
+                          />
+                          <div>
+                            <span className="text-xs font-bold text-amber-400 block">DIRETORIA EXECUTIVA</span>
+                            <span className="text-[10px] text-slate-400 leading-tight block mt-0.5">
+                              App Mobile · Consulta + Face ID
+                            </span>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+
+                    {editUserError && (
+                      <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 flex items-center gap-2">
+                        <AlertTriangle size={15} className="shrink-0" />
+                        <span>{editUserError}</span>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-end gap-3 pt-4 border-t border-white/10">
+                      <button
+                        type="button"
+                        onClick={() => setEditingUserOriginalEmail(null)}
+                        className="px-4 py-2.5 text-xs font-bold text-slate-400 hover:text-white hover:bg-white/5 rounded-xl transition-colors cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isSavingEditedUser}
+                        className="px-5 py-2.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl transition-all shadow-lg shadow-blue-600/20 flex items-center gap-2 cursor-pointer"
+                      >
+                        <CheckCircle2 size={15} />
+                        {isSavingEditedUser ? 'Salvando...' : 'Salvar Alterações'}
+                      </button>
+                    </div>
+                  </form>
+                </motion.div>
+              </div>
+            );
+          })()}
         </AnimatePresence>
       </main>
     </div>
