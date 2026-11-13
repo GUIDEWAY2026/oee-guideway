@@ -368,6 +368,7 @@ interface OEEResults {
 export type UserRole = 'admin' | 'operador' | 'usuario' | 'diretoria';
 
 interface User {
+  id?: string | number;
   name: string;
   email: string;
   password: string;
@@ -437,14 +438,55 @@ export const hashPassword = async (plainPassword: string, salt: string = PASSWOR
   }
 };
 
+const ROLE_MARKER = '::oee_role::';
+const AUDIT_LOG_EMAIL_PREFIX = '__oee_audit_log__+';
+const AUDIT_LOG_EMAIL_SUFFIX = '@audit.internal';
+
+export const isAuditLogEmail = (email: string | null | undefined): boolean => {
+  return typeof email === 'string' && email.startsWith(AUDIT_LOG_EMAIL_PREFIX);
+};
+
+export const splitPasswordAndRole = (rawPassword: string | null | undefined): { cleanPassword: string; embeddedRole: UserRole | null } => {
+  const raw = rawPassword || '';
+  const markerIndex = raw.indexOf(ROLE_MARKER);
+  if (markerIndex === -1) {
+    return { cleanPassword: raw, embeddedRole: null };
+  }
+  const cleanPassword = raw.slice(0, markerIndex);
+  const rolePart = raw.slice(markerIndex + ROLE_MARKER.length).trim();
+  const validRole: UserRole | null =
+    rolePart === 'admin' || rolePart === 'operador' || rolePart === 'usuario' || rolePart === 'diretoria'
+      ? rolePart
+      : null;
+  return { cleanPassword, embeddedRole: validRole };
+};
+
+export const attachRoleToPassword = (rawPassword: string | null | undefined, role: UserRole): string => {
+  const { cleanPassword } = splitPasswordAndRole(rawPassword);
+  return `${cleanPassword}${ROLE_MARKER}${role}`;
+};
+
+export const isMissingRoleColumnError = (err: any): boolean => {
+  if (!err) return false;
+  const code = String(err.code || '').toUpperCase();
+  const msg = String(err.message || err.details || err.hint || '').toLowerCase();
+  return (
+    code === '42703' ||
+    code === 'PGRST204' ||
+    (msg.includes('role') && (msg.includes('column') || msg.includes('schema cache')))
+  );
+};
+
 export const verifyPassword = async (inputPassword: string, storedPasswordHash: string): Promise<boolean> => {
   if (!storedPasswordHash || !inputPassword) return false;
+  const { cleanPassword } = splitPasswordAndRole(storedPasswordHash);
+  if (!cleanPassword) return false;
   // Suporte a senhas legadas em texto puro (migração automática transparente)
-  if (!storedPasswordHash.startsWith('sha256:')) {
-    return inputPassword === storedPasswordHash;
+  if (!cleanPassword.startsWith('sha256:')) {
+    return inputPassword === cleanPassword;
   }
   const computedHash = await hashPassword(inputPassword);
-  return computedHash === storedPasswordHash;
+  return computedHash === cleanPassword;
 };
 
 // =========================================================================
@@ -645,6 +687,8 @@ export default function App() {
     return safeGetLocalStorage<AccessLog[]>('oee_access_logs', []);
   });
   const [isLoadingAccessLogs, setIsLoadingAccessLogs] = useState(false);
+  const [accessLogSyncStatus, setAccessLogSyncStatus] = useState<'supabase' | 'local'>(isSupabaseConfigured ? 'supabase' : 'local');
+  const hasAccessLogsTableRef = useRef<boolean | null>(null);
   const [accessLogSearch, setAccessLogSearch] = useState('');
   const [accessLogFilterRole, setAccessLogFilterRole] = useState<'todos' | 'admin' | 'operador' | 'usuario' | 'diretoria'>('todos');
   const [accessLogFilterStatus, setAccessLogFilterStatus] = useState<'todos' | 'sucesso' | 'falha'>('todos');
@@ -979,8 +1023,9 @@ export default function App() {
       } else {
         const updates: any = {};
         if (!data.is_admin) updates.is_admin = true;
-        if (data.password && !data.password.startsWith('sha256:')) {
-          updates.password = defaultAdminPassHash;
+        const { cleanPassword: adminCleanPass, embeddedRole: adminEmbeddedRole } = splitPasswordAndRole(data.password);
+        if (data.password && !adminCleanPass.startsWith('sha256:')) {
+          updates.password = adminEmbeddedRole ? attachRoleToPassword(defaultAdminPassHash, adminEmbeddedRole) : defaultAdminPassHash;
         }
         if (Object.keys(updates).length > 0) {
           await supabase
@@ -1000,16 +1045,22 @@ export default function App() {
     try {
       if (useLocalFallback) {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
-        setUsers(localUsers.map(u => {
-          const role = normalizeUserRole(u.role, u.is_admin, u.email);
-          return {
-            name: u.name,
-            email: u.email,
-            password: u.password,
-            isAdmin: role === 'admin',
-            role
-          };
-        }));
+        setUsers(
+          localUsers
+            .filter(u => !isAuditLogEmail(u.email))
+            .map(u => {
+              const { cleanPassword, embeddedRole } = splitPasswordAndRole(u.password);
+              const role = normalizeUserRole(u.role || embeddedRole, u.is_admin, u.email);
+              return {
+                id: u.id,
+                name: u.name,
+                email: u.email,
+                password: cleanPassword,
+                isAdmin: role === 'admin',
+                role
+              };
+            })
+        );
         return;
       }
 
@@ -1021,31 +1072,43 @@ export default function App() {
       if (error) throw error;
       if (data) {
         const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
-        setUsers(data.map(u => {
-          const localMatch = localUsers.find(lu => lu.email.toLowerCase() === u.email.toLowerCase());
-          const role = normalizeUserRole(u.role || localMatch?.role, u.is_admin, u.email);
-          return {
-            name: u.name,
-            email: u.email,
-            password: u.password,
-            isAdmin: role === 'admin',
-            role
-          };
-        }));
+        setUsers(
+          data
+            .filter(u => !isAuditLogEmail(u.email))
+            .map(u => {
+              const { cleanPassword, embeddedRole } = splitPasswordAndRole(u.password);
+              const localMatch = localUsers.find(lu => lu.email.toLowerCase() === u.email.toLowerCase());
+              const role = normalizeUserRole(u.role || embeddedRole || localMatch?.role, u.is_admin, u.email);
+              return {
+                id: u.id,
+                name: u.name,
+                email: u.email,
+                password: cleanPassword,
+                isAdmin: role === 'admin',
+                role
+              };
+            })
+        );
       }
     } catch (error: any) {
       console.error('Erro ao buscar usuários, usando local:', error);
       const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
-      setUsers(localUsers.map(u => {
-        const role = normalizeUserRole(u.role, u.is_admin, u.email);
-        return {
-          name: u.name,
-          email: u.email,
-          password: u.password,
-          isAdmin: role === 'admin',
-          role
-        };
-      }));
+      setUsers(
+        localUsers
+          .filter(u => !isAuditLogEmail(u.email))
+          .map(u => {
+            const { cleanPassword, embeddedRole } = splitPasswordAndRole(u.password);
+            const role = normalizeUserRole(u.role || embeddedRole, u.is_admin, u.email);
+            return {
+              id: u.id,
+              name: u.name,
+              email: u.email,
+              password: cleanPassword,
+              isAdmin: role === 'admin',
+              role
+            };
+          })
+      );
     } finally {
       setIsLoadingUsers(false);
     }
@@ -1070,23 +1133,86 @@ export default function App() {
       localStorage.setItem('oee_access_logs', JSON.stringify(updated));
       setAccessLogs(updated);
 
-      // Tenta gravar no Supabase caso a tabela access_logs exista
-      if (!useLocalFallback) {
-        try {
-          await supabase.from('access_logs').insert([{
-            user_name: newEntry.user_name,
-            user_email: newEntry.user_email,
-            user_role: newEntry.user_role,
-            login_at: newEntry.login_at,
-            device_info: newEntry.device_info,
-            status: newEntry.status
-          }]);
-        } catch {
-          // Falha silenciosa se tabela remota não existir ainda
+      // Grava no Supabase (tenta tabela dedicada access_logs e, se não existir, persiste na tabela users como registro de auditoria)
+      if (!useLocalFallback && isSupabaseConfigured) {
+        let savedInDedicatedTable = false;
+
+        if (hasAccessLogsTableRef.current !== false) {
+          try {
+            const { error: insertErr } = await supabase.from('access_logs').insert([{
+              user_name: newEntry.user_name,
+              user_email: newEntry.user_email,
+              user_role: newEntry.user_role,
+              login_at: newEntry.login_at,
+              device_info: newEntry.device_info,
+              status: newEntry.status
+            }]);
+
+            if (!insertErr) {
+              hasAccessLogsTableRef.current = true;
+              savedInDedicatedTable = true;
+              setAccessLogSyncStatus('supabase');
+            } else {
+              hasAccessLogsTableRef.current = false;
+            }
+          } catch {
+            hasAccessLogsTableRef.current = false;
+          }
+        }
+
+        if (!savedInDedicatedTable) {
+          try {
+            const compactAuditPayload = JSON.stringify({
+              n: newEntry.user_name.slice(0, 60),
+              e: newEntry.user_email.slice(0, 80),
+              r: String(newEntry.user_role).slice(0, 20),
+              t: newEntry.login_at,
+              d: newEntry.device_info.slice(0, 45),
+              s: newEntry.status
+            });
+            const { error: fallbackInsertErr } = await supabase.from('users').insert([{
+              name: compactAuditPayload,
+              email: `${AUDIT_LOG_EMAIL_PREFIX}${newEntry.id}${AUDIT_LOG_EMAIL_SUFFIX}`,
+              password: '__AUDIT_LOG_RECORD__',
+              is_admin: false
+            }]);
+
+            if (!fallbackInsertErr) {
+              setAccessLogSyncStatus('supabase');
+            } else {
+              console.warn('Falha ao gravar registro de acesso no Supabase:', fallbackInsertErr.message);
+            }
+          } catch (fallbackCatchErr) {
+            console.warn('Erro ao gravar registro de acesso no fallback Supabase:', fallbackCatchErr);
+          }
         }
       }
     } catch (err) {
       console.error('Erro ao registrar log de acesso:', err);
+    }
+  };
+
+  // Converter linha de auditoria salva na tabela users para AccessLog
+  const parseAuditUserRow = (row: any): AccessLog | null => {
+    try {
+      if (!row?.name) return null;
+      const parsed = JSON.parse(row.name);
+      const rawEmail = String(row.email || '');
+      const extractedId = rawEmail.startsWith(AUDIT_LOG_EMAIL_PREFIX)
+        ? rawEmail.slice(AUDIT_LOG_EMAIL_PREFIX.length).replace(AUDIT_LOG_EMAIL_SUFFIX, '')
+        : String(row.id || `log-${Date.now()}`);
+
+      return {
+        id: parsed.id || extractedId,
+        user_name: parsed.n || parsed.user_name || 'Usuário',
+        user_email: parsed.e || parsed.user_email || '',
+        user_role: parsed.r || parsed.user_role || 'operador',
+        login_at: parsed.t || parsed.login_at || new Date().toISOString(),
+        device_info: parsed.d || parsed.device_info || 'Web',
+        status: (parsed.s || parsed.status) === 'falha' ? 'falha' : 'sucesso'
+      };
+    } catch {
+      return null;
     }
   };
 
@@ -1096,49 +1222,108 @@ export default function App() {
     setIsLoadingAccessLogs(true);
     try {
       const localLogs = safeGetLocalStorage<AccessLog[]>('oee_access_logs', []);
-      if (useLocalFallback) {
+      if (useLocalFallback || !isSupabaseConfigured) {
+        setAccessLogSyncStatus('local');
         setAccessLogs(localLogs);
         return;
       }
 
-      const { data, error } = await supabase
-        .from('access_logs')
-        .select('*')
-        .order('login_at', { ascending: false })
-        .limit(300);
+      const map = new Map<string, AccessLog>();
+      let syncedWithSupabase = false;
 
-      if (error || !data || data.length === 0) {
-        setAccessLogs(localLogs);
-      } else {
-        // Mesclar dados do Supabase com os locais
-        const map = new Map<string, AccessLog>();
-        data.forEach(item => {
-          const key = item.id || `${item.login_at}_${item.user_email}`;
-          map.set(key, {
-            id: item.id || `log-${item.login_at}`,
-            user_name: item.user_name,
-            user_email: item.user_email,
-            user_role: item.user_role,
-            login_at: item.login_at,
-            device_info: item.device_info,
-            status: item.status || 'sucesso'
+      // 1. Tenta buscar da tabela access_logs se disponível
+      if (hasAccessLogsTableRef.current !== false) {
+        const { data, error } = await supabase
+          .from('access_logs')
+          .select('*')
+          .order('login_at', { ascending: false })
+          .limit(300);
+
+        if (!error && data) {
+          hasAccessLogsTableRef.current = true;
+          syncedWithSupabase = true;
+          data.forEach(item => {
+            const key = String(item.id || `${item.login_at}_${item.user_email}`);
+            map.set(key, {
+              id: String(item.id || `log-${item.login_at}`),
+              user_name: item.user_name,
+              user_email: item.user_email,
+              user_role: item.user_role,
+              login_at: item.login_at,
+              device_info: item.device_info,
+              status: item.status || 'sucesso'
+            });
           });
-        });
-        localLogs.forEach(item => {
-          if (!map.has(item.id)) {
-            map.set(item.id, item);
+        } else if (error) {
+          hasAccessLogsTableRef.current = false;
+        }
+      }
+
+      // 2. Busca registros de auditoria salvos no fallback da tabela users (ordenados do mais recente pelo timestamp no prefixo)
+      const { data: auditRows, error: auditErr } = await supabase
+        .from('users')
+        .select('id, name, email')
+        .like('email', `${AUDIT_LOG_EMAIL_PREFIX}%`)
+        .order('email', { ascending: false })
+        .limit(500);
+
+      if (!auditErr && auditRows) {
+        syncedWithSupabase = true;
+        const existingSignatures = new Set(
+          Array.from(map.values()).map(l => `${l.login_at}_${l.user_email}_${l.status}`)
+        );
+        auditRows.forEach(row => {
+          const parsedLog = parseAuditUserRow(row);
+          if (parsedLog) {
+            const sig = `${parsedLog.login_at}_${parsedLog.user_email}_${parsedLog.status}`;
+            if (!map.has(parsedLog.id) && !existingSignatures.has(sig)) {
+              map.set(parsedLog.id, parsedLog);
+              existingSignatures.add(sig);
+            }
           }
         });
-        const merged = Array.from(map.values()).sort(
-          (a, b) => new Date(b.login_at).getTime() - new Date(a.login_at).getTime()
-        );
-        setAccessLogs(merged);
       }
+
+      setAccessLogSyncStatus(syncedWithSupabase ? 'supabase' : 'local');
+
+      // 3. Mescla com logs locais sem duplicar
+      const existingSignatures = new Set(
+        Array.from(map.values()).map(l => `${l.login_at}_${l.user_email}_${l.status}`)
+      );
+      localLogs.forEach(item => {
+        const sig = `${item.login_at}_${item.user_email}_${item.status}`;
+        if (!map.has(item.id) && !existingSignatures.has(sig)) {
+          map.set(item.id, item);
+        }
+      });
+
+      const merged = Array.from(map.values()).sort(
+        (a, b) => new Date(b.login_at).getTime() - new Date(a.login_at).getTime()
+      );
+      setAccessLogs(merged);
     } catch (e) {
       const localLogs = safeGetLocalStorage<AccessLog[]>('oee_access_logs', []);
+      setAccessLogSyncStatus('local');
       setAccessLogs(localLogs);
     } finally {
       setIsLoadingAccessLogs(false);
+    }
+  };
+
+  // Limpar histórico de acessos (Local + Supabase)
+  const handleClearAccessLogs = async () => {
+    if (!confirm('Deseja realmente limpar todo o histórico de registros de acesso?')) return;
+    localStorage.removeItem('oee_access_logs');
+    setAccessLogs([]);
+    if (!useLocalFallback && isSupabaseConfigured) {
+      try {
+        if (hasAccessLogsTableRef.current !== false) {
+          await supabase.from('access_logs').delete().neq('user_email', '__never__');
+        }
+      } catch {}
+      try {
+        await supabase.from('users').delete().like('email', `${AUDIT_LOG_EMAIL_PREFIX}%`);
+      } catch {}
     }
   };
 
@@ -1242,6 +1427,9 @@ export default function App() {
     if (showAdminPanel) {
       fetchUsers();
       fetchStopCodes();
+      if (isUserAdmin(currentUser)) {
+        fetchAccessLogs();
+      }
     }
   }, [showAdminPanel]);
 
@@ -3084,6 +3272,9 @@ ${rowsXml}
   useEffect(() => {
     if (currentUser) {
       fetchStopCodes(); // Recarrega códigos de parada após autenticação bem-sucedida no Supabase
+      if (isUserAdmin(currentUser)) {
+        fetchAccessLogs();
+      }
       if (isUserDiretoria(currentUser)) {
         fetchAllSystemRecords();
       } else if (activeTab === 'dashboard' && !dashboardRecord) {
@@ -3104,6 +3295,10 @@ ${rowsXml}
     
     try {
       const cleanEmail = loginEmail.trim();
+      if (isAuditLogEmail(cleanEmail)) {
+        setLoginError('E-mail ou senha incorretos.');
+        return;
+      }
       const clientDevice = typeof navigator !== 'undefined' 
         ? (navigator.userAgent.includes('Mobile') ? 'Mobile / Smartphone' : 'Desktop / Computador')
         : 'Desktop';
@@ -3157,7 +3352,8 @@ ${rowsXml}
         }
 
         // Se a senha armazenada ainda for em texto puro legado, faz upgrade criptográfico automático imediato
-        if (matched.password && !matched.password.startsWith('sha256:')) {
+        const { cleanPassword: matchedCleanPass, embeddedRole: matchedEmbeddedRole } = splitPasswordAndRole(matched.password);
+        if (matchedCleanPass && !matchedCleanPass.startsWith('sha256:')) {
           const newHashed = await hashPassword(loginPassword);
           const migratedUsers = updatedUsers.map(u => 
             u.email.toLowerCase() === cleanEmail.toLowerCase() ? { ...u, password: newHashed } : u
@@ -3166,12 +3362,13 @@ ${rowsXml}
           matched.password = newHashed;
         }
 
-        const role = normalizeUserRole(matched.role, matched.is_admin, matched.email);
+        const role = normalizeUserRole(matched.role || matchedEmbeddedRole, matched.is_admin, matched.email);
 
         const user: User = {
+          id: matched.id,
           name: matched.name,
           email: matched.email,
-          password: matched.password,
+          password: splitPasswordAndRole(matched.password).cleanPassword,
           isAdmin: role === 'admin',
           role
         };
@@ -3209,12 +3406,13 @@ ${rowsXml}
         return;
       }
 
+      const { cleanPassword, embeddedRole } = splitPasswordAndRole(data.password);
       const isPasswordValid = await verifyPassword(loginPassword, data.password);
       if (!isPasswordValid) {
         recordAccessLog({
           user_name: data.name,
           user_email: data.email,
-          user_role: data.role || (data.is_admin ? 'admin' : 'operador'),
+          user_role: data.role || embeddedRole || (data.is_admin ? 'admin' : 'operador'),
           status: 'falha',
           device_info: clientDevice
         });
@@ -3222,29 +3420,33 @@ ${rowsXml}
         return;
       }
 
-      // Se a senha no Supabase ainda for texto puro, faz upgrade criptográfico
-      if (data.password && !data.password.startsWith('sha256:')) {
-        const newHashed = await hashPassword(loginPassword);
-        try {
-          await supabase.from('users').update({ password: newHashed }).eq('id', data.id);
-        } catch {}
-        data.password = newHashed;
-      }
-
       const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
       const localMatch = localUsers.find(lu => lu.email.toLowerCase() === cleanEmail.toLowerCase());
-      const role = normalizeUserRole(data.role || localMatch?.role, data.is_admin, data.email);
+      const role = normalizeUserRole(data.role || embeddedRole || localMatch?.role, data.is_admin, data.email);
+
+      // Se a senha no Supabase ainda for texto puro, faz upgrade criptográfico preservando o papel em fallback se necessário
+      let finalCleanPassword = cleanPassword;
+      if (cleanPassword && !cleanPassword.startsWith('sha256:')) {
+        const newHashed = await hashPassword(loginPassword);
+        const hasRoleColumn = Object.prototype.hasOwnProperty.call(data, 'role');
+        const dbPasswordToSave = hasRoleColumn ? newHashed : attachRoleToPassword(newHashed, role);
+        try {
+          await supabase.from('users').update({ password: dbPasswordToSave }).eq('id', data.id);
+        } catch {}
+        finalCleanPassword = newHashed;
+      }
 
       const user: User = {
+        id: data.id,
         name: data.name,
         email: data.email,
-        password: data.password,
+        password: finalCleanPassword,
         isAdmin: role === 'admin',
         role
       };
 
       // REGISTRAR LOGIN COM SUCESSO NO CONTROLE DE ACESSOS
-      recordAccessLog({
+      await recordAccessLog({
         user_name: user.name,
         user_email: user.email,
         user_role: user.role,
@@ -3298,11 +3500,13 @@ ${rowsXml}
             .ilike('email', profile.userEmail)
             .maybeSingle();
           if (data) {
-            const role = normalizeUserRole(data.role || profile.userRole, data.is_admin, data.email);
+            const { cleanPassword, embeddedRole } = splitPasswordAndRole(data.password);
+            const role = normalizeUserRole(data.role || embeddedRole || profile.userRole, data.is_admin, data.email);
             resolvedUser = {
+              id: data.id,
               name: data.name || profile.userName,
               email: data.email || profile.userEmail,
-              password: data.password || profile.passwordHash,
+              password: cleanPassword || profile.passwordHash,
               isAdmin: role === 'admin',
               role
             };
@@ -3312,7 +3516,7 @@ ${rowsXml}
         }
       }
 
-      recordAccessLog({
+      await recordAccessLog({
         user_name: resolvedUser.name,
         user_email: resolvedUser.email,
         user_role: resolvedUser.role,
@@ -3346,6 +3550,10 @@ ${rowsXml}
     e.preventDefault();
     try {
       const cleanEmail = newUserEmail.trim();
+      if (isAuditLogEmail(cleanEmail)) {
+        alert('Este formato de e-mail é reservado para auditoria interna.');
+        return;
+      }
       const isAdminRole = newUserRole === 'admin';
       const passwordHashed = await hashPassword(newUserPassword);
 
@@ -3386,11 +3594,11 @@ ${rowsXml}
         .insert([userPayload]);
 
       if (error) {
-        if (error.message?.includes('column "role"') || error.code === '42703') {
+        if (isMissingRoleColumnError(error)) {
           const fallbackPayload = {
             name: newUserName,
             email: cleanEmail,
-            password: passwordHashed,
+            password: attachRoleToPassword(passwordHashed, newUserRole),
             is_admin: isAdminRole
           };
           const { error: err2 } = await supabase.from('users').insert([fallbackPayload]);
@@ -3443,15 +3651,30 @@ ${rowsXml}
         return;
       }
 
+      const targetUserObj = users.find(u => u.email.toLowerCase() === email.toLowerCase());
+      const preservedRole = targetUserObj
+        ? normalizeUserRole(targetUserObj.role, targetUserObj.isAdmin, targetUserObj.email)
+        : 'operador';
+
       const { error } = await supabase
         .from('users')
-        .update({ password: hashed })
+        .update({ password: hashed, role: preservedRole })
         .ilike('email', email);
 
-      if (error) throw error;
+      if (error) {
+        if (isMissingRoleColumnError(error)) {
+          const { error: err2 } = await supabase
+            .from('users')
+            .update({ password: attachRoleToPassword(hashed, preservedRole) })
+            .ilike('email', email);
+          if (err2) throw err2;
+        } else {
+          throw error;
+        }
+      }
 
       const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
-      const updated = localUsers.map(u => u.email.toLowerCase() === email.toLowerCase() ? { ...u, password: hashed } : u);
+      const updated = localUsers.map(u => u.email.toLowerCase() === email.toLowerCase() ? { ...u, password: hashed, role: preservedRole } : u);
       localStorage.setItem('oee_local_users', JSON.stringify(updated));
 
       alert('Senha redefinida com sucesso e protegida com criptografia SHA-256!');
@@ -3510,11 +3733,20 @@ ${rowsXml}
       const existingUserObj = users.find(
         u => u.email.toLowerCase() === editingUserOriginalEmail.toLowerCase()
       );
+      const existingCleanPassword = splitPasswordAndRole(existingUserObj?.password).cleanPassword;
       const updatedPasswordHash = trimmedPassword
         ? await hashPassword(trimmedPassword)
-        : (existingUserObj?.password || '');
+        : existingCleanPassword;
 
       if (!useLocalFallback) {
+        const applySupabaseUserUpdate = async (payload: any) => {
+          const query = supabase.from('users').update(payload);
+          if (existingUserObj?.id !== undefined && existingUserObj?.id !== null) {
+            return await query.eq('id', existingUserObj.id);
+          }
+          return await query.ilike('email', editingUserOriginalEmail);
+        };
+
         const updatePayload: any = {
           name: trimmedName,
           email: trimmedEmail,
@@ -3523,27 +3755,30 @@ ${rowsXml}
         };
         if (trimmedPassword) {
           updatePayload.password = updatedPasswordHash;
+        } else if (existingCleanPassword) {
+          updatePayload.password = existingCleanPassword;
         }
 
-        const { error } = await supabase
-          .from('users')
-          .update(updatePayload)
-          .ilike('email', editingUserOriginalEmail);
+        const { error } = await applySupabaseUserUpdate(updatePayload);
 
         if (error) {
-          if (error.message?.includes('column "role"') || error.code === '42703') {
+          if (isMissingRoleColumnError(error)) {
+            let basePassword = updatedPasswordHash;
+            if (!basePassword) {
+              const { data: currentRow } = await supabase
+                .from('users')
+                .select('password')
+                .ilike('email', editingUserOriginalEmail)
+                .maybeSingle();
+              basePassword = splitPasswordAndRole(currentRow?.password).cleanPassword;
+            }
             const fallbackPayload: any = {
               name: trimmedName,
               email: trimmedEmail,
-              is_admin: isAdminRole
+              is_admin: isAdminRole,
+              password: attachRoleToPassword(basePassword, resolvedRole)
             };
-            if (trimmedPassword) {
-              fallbackPayload.password = updatedPasswordHash;
-            }
-            const { error: err2 } = await supabase
-              .from('users')
-              .update(fallbackPayload)
-              .ilike('email', editingUserOriginalEmail);
+            const { error: err2 } = await applySupabaseUserUpdate(fallbackPayload);
             if (err2) throw err2;
           } else {
             throw error;
@@ -3652,9 +3887,12 @@ ${rowsXml}
       const { error } = await supabase
         .from('users')
         .delete()
-        .eq('email', email);
+        .ilike('email', email);
 
       if (error) throw error;
+      const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+      const filtered = localUsers.filter(u => u.email.toLowerCase() !== email.toLowerCase());
+      localStorage.setItem('oee_local_users', JSON.stringify(filtered));
       fetchUsers();
     } catch (error: any) {
       console.error('Erro ao excluir usuário:', error);
@@ -4474,13 +4712,15 @@ ${rowsXml}
 
                 <div className="bg-gradient-to-br from-indigo-950/40 to-emerald-950/30 border border-emerald-500/30 rounded-2xl p-5 shadow-lg">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest">Criptografia Ativa</span>
+                    <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest">Criptografia & Banco</span>
                     <ShieldCheck size={16} className="text-emerald-400" />
                   </div>
                   <p className="text-base font-bold text-white flex items-center gap-1.5">
-                    SHA-256 + Salt
+                    {accessLogSyncStatus === 'supabase' ? 'Supabase + SHA-256' : 'Cache Local + SHA-256'}
                   </p>
-                  <span className="text-[10px] text-emerald-300/80 mt-1 block">Senhas protegidas e irreversíveis</span>
+                  <span className="text-[10px] text-emerald-300/80 mt-1 block">
+                    {accessLogSyncStatus === 'supabase' ? 'Acessos de todos os dispositivos salvos na nuvem' : 'Auditoria em armazenamento local do navegador'}
+                  </span>
                 </div>
               </div>
 
@@ -4571,12 +4811,7 @@ ${rowsXml}
                     </button>
 
                     <button 
-                      onClick={() => {
-                        if (confirm('Deseja realmente limpar o histórico local de registros de acesso?')) {
-                          localStorage.removeItem('oee_access_logs');
-                          setAccessLogs([]);
-                        }
-                      }}
+                      onClick={handleClearAccessLogs}
                       className="p-2.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 transition-all cursor-pointer"
                       title="Limpar histórico de acessos"
                     >
@@ -7622,7 +7857,7 @@ ${rowsXml}
                       <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Proteção de Senha</span>
                       <span className="text-emerald-400 font-semibold flex items-center gap-1.5 mt-0.5">
                         <ShieldCheck size={14} />
-                        {targetUser?.password?.startsWith('sha256:') ? 'Criptografia SHA-256 Ativa' : 'Proteção Padrão'}
+                        {splitPasswordAndRole(targetUser?.password).cleanPassword.startsWith('sha256:') ? 'Criptografia SHA-256 Ativa' : 'Proteção Padrão'}
                       </span>
                     </div>
                     <div>
