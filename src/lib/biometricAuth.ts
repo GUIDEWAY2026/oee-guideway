@@ -76,7 +76,25 @@ export const getEnrolledBiometricProfiles = (): BiometricCredentialProfile[] => 
     const raw = localStorage.getItem(BIOMETRIC_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    // Aceita exclusivamente credenciais nativas WebAuthn validadas pelo hardware (remove qualquer perfil legado sem WebAuthn)
+    const validProfiles = parsed.filter(
+      (p: any): p is BiometricCredentialProfile =>
+        Boolean(
+          p &&
+            p.method === 'webauthn-platform' &&
+            typeof p.credentialId === 'string' &&
+            p.credentialId.length > 0 &&
+            typeof p.userEmail === 'string' &&
+            p.userEmail.includes('@') &&
+            typeof p.passwordHash === 'string' &&
+            p.passwordHash.length > 0
+        )
+    );
+    if (validProfiles.length !== parsed.length) {
+      localStorage.setItem(BIOMETRIC_STORAGE_KEY, JSON.stringify(validProfiles));
+    }
+    return validProfiles;
   } catch {
     return [];
   }
@@ -113,91 +131,99 @@ export const enrollBiometricFaceId = async (user: {
   const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
   const nativeSupported = await isPlatformBiometricAvailable();
 
-  let credentialId = '';
-  let method: 'webauthn-platform' | 'device-passkey' = 'device-passkey';
-  let usedNativeWebAuthn = false;
+  if (isInIframe) {
+    return {
+      success: false,
+      usedNativeWebAuthn: false,
+      error: 'Para cadastrar a Leitura Facial com segurança, abra o aplicativo diretamente no navegador do celular (fora de janelas incorporadas).',
+    };
+  }
 
-  if (nativeSupported && !isInIframe && typeof navigator !== 'undefined' && navigator.credentials) {
-    try {
-      const challenge = new Uint8Array(32);
-      crypto.getRandomValues(challenge);
-      const userIdBytes = new TextEncoder().encode(user.email.toLowerCase());
+  if (!nativeSupported || typeof navigator === 'undefined' || !navigator.credentials) {
+    return {
+      success: false,
+      usedNativeWebAuthn: false,
+      error: 'Este dispositivo ou navegador não possui Face ID / Biometria nativa compatível ativada.',
+    };
+  }
 
-      const publicKeyCredentialCreationOptions: PublicKeyCredentialCreationOptions = {
-        challenge,
-        rp: {
-          name: 'OEE GUIDEWAY',
-          id: window.location.hostname || undefined,
-        },
-        user: {
-          id: userIdBytes,
-          name: user.email,
-          displayName: user.name,
-        },
-        pubKeyCredParams: [
-          { alg: -7, type: 'public-key' },   // ES256 (iOS Secure Enclave / Android Keystore)
-          { alg: -257, type: 'public-key' }, // RS256 fallback
-        ],
-        authenticatorSelection: {
-          authenticatorAttachment: 'platform',
-          userVerification: 'required',
-          residentKey: 'preferred',
-        },
-        timeout: 60000,
-        attestation: 'none',
+  try {
+    const challenge = new Uint8Array(32);
+    crypto.getRandomValues(challenge);
+    const userIdBytes = new TextEncoder().encode(user.email.toLowerCase());
+
+    const publicKeyCredentialCreationOptions: PublicKeyCredentialCreationOptions = {
+      challenge,
+      rp: {
+        name: 'OEE GUIDEWAY',
+        id: window.location.hostname || undefined,
+      },
+      user: {
+        id: userIdBytes,
+        name: user.email,
+        displayName: user.name,
+      },
+      pubKeyCredParams: [
+        { alg: -7, type: 'public-key' },   // ES256 (iOS Secure Enclave / Android Keystore)
+        { alg: -257, type: 'public-key' }, // RS256 fallback
+      ],
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        userVerification: 'required',
+        residentKey: 'preferred',
+      },
+      timeout: 60000,
+      attestation: 'none',
+    };
+
+    const credential = (await navigator.credentials.create({
+      publicKey: publicKeyCredentialCreationOptions,
+    })) as PublicKeyCredential | null;
+
+    if (!credential) {
+      return {
+        success: false,
+        usedNativeWebAuthn: false,
+        error: 'Não foi possível criar a credencial biométrica no aparelho.',
       };
-
-      const credential = (await navigator.credentials.create({
-        publicKey: publicKeyCredentialCreationOptions,
-      })) as PublicKeyCredential | null;
-
-      if (credential) {
-        credentialId = bufferToBase64Url(credential.rawId);
-        method = 'webauthn-platform';
-        usedNativeWebAuthn = true;
-      }
-    } catch (err: any) {
-      // Se o usuário cancelou explicitamente fora de iframe, retorna erro amigável;
-      // se bloqueado por política/iframe ou falta de hardware, faz fallback seguro para credencial vinculada ao dispositivo
-      if (err?.name === 'NotAllowedError' && !isInIframe) {
-        return {
-          success: false,
-          usedNativeWebAuthn: false,
-          error: 'Verificação facial cancelada no dispositivo. Tente novamente.',
-        };
-      }
-      console.warn('WebAuthn nativo indisponível neste contexto, ativando credencial biométrica do dispositivo:', err?.name);
     }
+
+    const credentialId = bufferToBase64Url(credential.rawId);
+    const profile: BiometricCredentialProfile = {
+      credentialId,
+      userEmail: user.email,
+      userName: user.name,
+      userRole: user.role,
+      passwordHash: user.passwordHash,
+      method: 'webauthn-platform',
+      deviceLabel: platformInfo.label,
+      enrolledAt: new Date().toISOString(),
+    };
+
+    const existing = getEnrolledBiometricProfiles().filter(
+      (p) => p.userEmail.toLowerCase() !== user.email.toLowerCase()
+    );
+    localStorage.setItem(BIOMETRIC_STORAGE_KEY, JSON.stringify([profile, ...existing]));
+
+    return {
+      success: true,
+      profile,
+      usedNativeWebAuthn: true,
+    };
+  } catch (err: any) {
+    if (err?.name === 'NotAllowedError') {
+      return {
+        success: false,
+        usedNativeWebAuthn: false,
+        error: 'Verificação facial cancelada no dispositivo. Tente novamente.',
+      };
+    }
+    return {
+      success: false,
+      usedNativeWebAuthn: false,
+      error: `Falha ao ativar ${platformInfo.shortLabel} (${err?.name || 'erro de segurança'}). Utilize E-mail e Senha.`,
+    };
   }
-
-  if (!credentialId) {
-    const randomBytes = new Uint8Array(24);
-    crypto.getRandomValues(randomBytes);
-    credentialId = `face_${bufferToBase64Url(randomBytes.buffer)}`;
-    method = 'device-passkey';
-  }
-
-  const profile: BiometricCredentialProfile = {
-    credentialId,
-    userEmail: user.email,
-    userName: user.name,
-    userRole: user.role,
-    passwordHash: user.passwordHash,
-    method,
-    deviceLabel: platformInfo.label,
-    enrolledAt: new Date().toISOString(),
-  };
-
-  const existing = getEnrolledBiometricProfiles().filter(
-    (p) => p.userEmail.toLowerCase() !== user.email.toLowerCase()
-  );
-  localStorage.setItem(BIOMETRIC_STORAGE_KEY, JSON.stringify([profile, ...existing]));
-
-  return {
-    success: true,
-    profile,
-    usedNativeWebAuthn,
-  };
 };
 
 export const authenticateWithBiometricFaceId = async (
@@ -213,7 +239,7 @@ export const authenticateWithBiometricFaceId = async (
     return {
       success: false,
       usedNativeWebAuthn: false,
-      error: 'Nenhuma leitura facial cadastrada neste dispositivo. Faça o primeiro acesso com E-mail e Senha.',
+      error: 'Nenhuma leitura facial cadastrada neste dispositivo. Faça o acesso com E-mail e Senha.',
     };
   }
 
@@ -224,61 +250,68 @@ export const authenticateWithBiometricFaceId = async (
   const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
 
   if (
-    profile.method === 'webauthn-platform' &&
-    !isInIframe &&
-    typeof navigator !== 'undefined' &&
-    navigator.credentials &&
-    window.PublicKeyCredential
+    profile.method !== 'webauthn-platform' ||
+    isInIframe ||
+    typeof navigator === 'undefined' ||
+    !navigator.credentials ||
+    !window.PublicKeyCredential
   ) {
-    try {
-      const challenge = new Uint8Array(32);
-      crypto.getRandomValues(challenge);
-      const rawIdBytes = base64UrlToUint8Array(profile.credentialId);
-
-      const assertion = await navigator.credentials.get({
-        publicKey: {
-          challenge,
-          allowCredentials: [
-            {
-              id: rawIdBytes.buffer as ArrayBuffer,
-              type: 'public-key',
-              transports: ['internal'],
-            },
-          ],
-          userVerification: 'required',
-          timeout: 60000,
-        },
-      });
-
-      if (!assertion) {
-        return {
-          success: false,
-          usedNativeWebAuthn: true,
-          error: 'Leitura facial não confirmada pelo dispositivo.',
-        };
-      }
-
-      return {
-        success: true,
-        profile,
-        usedNativeWebAuthn: true,
-      };
-    } catch (err: any) {
-      if (err?.name === 'NotAllowedError') {
-        return {
-          success: false,
-          usedNativeWebAuthn: true,
-          error: 'Leitura facial cancelada ou não reconhecida. Você pode entrar com sua senha.',
-        };
-      }
-      console.warn('Fallback para credencial biométrica vinculada ao dispositivo:', err);
-    }
+    return {
+      success: false,
+      profile,
+      usedNativeWebAuthn: false,
+      error: 'Leitura facial nativa indisponível neste contexto. Entre utilizando E-mail e Senha.',
+    };
   }
 
-  // Validação via credencial criptografada vinculada ao dispositivo
-  return {
-    success: true,
-    profile,
-    usedNativeWebAuthn: false,
-  };
+  try {
+    const challenge = new Uint8Array(32);
+    crypto.getRandomValues(challenge);
+    const rawIdBytes = base64UrlToUint8Array(profile.credentialId);
+
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        allowCredentials: [
+          {
+            id: rawIdBytes.buffer as ArrayBuffer,
+            type: 'public-key',
+            transports: ['internal'],
+          },
+        ],
+        userVerification: 'required',
+        timeout: 60000,
+      },
+    });
+
+    if (!assertion) {
+      return {
+        success: false,
+        profile,
+        usedNativeWebAuthn: true,
+        error: 'Leitura facial não confirmada pelo dispositivo.',
+      };
+    }
+
+    return {
+      success: true,
+      profile,
+      usedNativeWebAuthn: true,
+    };
+  } catch (err: any) {
+    if (err?.name === 'NotAllowedError') {
+      return {
+        success: false,
+        profile,
+        usedNativeWebAuthn: true,
+        error: 'Leitura facial cancelada ou não reconhecida. Você pode entrar com sua senha.',
+      };
+    }
+    return {
+      success: false,
+      profile,
+      usedNativeWebAuthn: true,
+      error: 'Não foi possível validar sua leitura facial no aparelho. Entre utilizando E-mail e Senha.',
+    };
+  }
 };

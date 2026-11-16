@@ -566,9 +566,7 @@ export const ExecutiveMobileApp: React.FC<ExecutiveMobileAppProps> = ({
 
       setEnrolledFaceProfile(res.profile);
       setFaceEnrollSuccess(
-        res.usedNativeWebAuthn
-          ? `Leitura Facial (${platformBiometric.shortLabel}) cadastrada com sucesso! Nos próximos acessos você entrará direto sem digitar senha.`
-          : `Leitura Facial cadastrada e vinculada com segurança a este dispositivo! Nos próximos acessos você poderá entrar com 1 toque.`
+        `Leitura Facial (${platformBiometric.shortLabel}) cadastrada com sucesso! Nos próximos acessos você poderá autenticar diretamente pelo reconhecimento facial nativo do seu aparelho.`
       );
     } catch (err: any) {
       setFaceEnrollError(err?.message || 'Erro ao configurar leitura facial.');

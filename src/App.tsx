@@ -75,6 +75,7 @@ import {
   authenticateWithBiometricFaceId,
   detectBiometricPlatform,
   getEnrolledBiometricProfiles,
+  removeBiometricForEmail,
 } from '@/lib/biometricAuth';
 
 // Error Boundary Component
@@ -446,6 +447,10 @@ export const isAuditLogEmail = (email: string | null | undefined): boolean => {
   return typeof email === 'string' && email.startsWith(AUDIT_LOG_EMAIL_PREFIX);
 };
 
+export const escapeLikePattern = (value: string): string => {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+};
+
 export const splitPasswordAndRole = (rawPassword: string | null | undefined): { cleanPassword: string; embeddedRole: UserRole | null } => {
   const raw = rawPassword || '';
   const markerIndex = raw.indexOf(ROLE_MARKER);
@@ -677,6 +682,13 @@ export default function App() {
   const [useLocalFallback, setUseLocalFallback] = useState(!isSupabaseConfigured);
   // Auth State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isVerifyingSession, setIsVerifyingSession] = useState<boolean>(() => {
+    try {
+      return typeof window !== 'undefined' && Boolean(sessionStorage.getItem('oee_guide_session'));
+    } catch {
+      return false;
+    }
+  });
   const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -3233,27 +3245,142 @@ ${rowsXml}
     { name: 'TEMPO ÚTIL', value: results.X, color: '#0369a1' },
   ];
 
-  // Initialize session
+  // Initialize & verify active tab session (nunca persiste login automático entre aberturas de link/navegador)
   useEffect(() => {
+    let isCancelled = false;
     ensureAdminExists();
-    const session = localStorage.getItem('oee_guide_session');
-    if (session) {
+
+    // Limpa qualquer sessão antiga salva em localStorage para exigir login/biometria ao abrir novo link ou app
+    try {
+      localStorage.removeItem('oee_guide_session');
+    } catch {}
+
+    const restoreAndVerifySession = async () => {
+      let rawSession: string | null = null;
       try {
-        const parsed = JSON.parse(session);
-        if (parsed) {
-          // Garante que se o e-mail da sessão for o do admin principal, herda isAdmin true e role admin instantaneamente
-          if (parsed.email && parsed.email.toLowerCase() === MAIN_ADMIN_EMAIL.toLowerCase()) {
-            parsed.isAdmin = true;
-            parsed.role = 'admin';
-          } else if (!parsed.role) {
-            parsed.role = parsed.isAdmin ? 'admin' : 'operador';
+        rawSession = sessionStorage.getItem('oee_guide_session');
+      } catch {
+        rawSession = null;
+      }
+
+      if (!rawSession) {
+        if (!isCancelled) setIsVerifyingSession(false);
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(rawSession);
+        if (
+          !parsed ||
+          typeof parsed.email !== 'string' ||
+          !parsed.email.trim() ||
+          typeof parsed.password !== 'string' ||
+          !parsed.password.trim() ||
+          isAuditLogEmail(parsed.email)
+        ) {
+          sessionStorage.removeItem('oee_guide_session');
+          if (!isCancelled) {
+            setCurrentUser(null);
+            setIsVerifyingSession(false);
           }
-          setCurrentUser(parsed);
+          return;
+        }
+
+        const cleanParsedEmail = parsed.email.trim();
+        const parsedCleanPass = splitPasswordAndRole(parsed.password).cleanPassword;
+
+        if (!useLocalFallback && isSupabaseConfigured) {
+          const { data, error } = await supabase
+            .from('users')
+            .select('*')
+            .ilike('email', escapeLikePattern(cleanParsedEmail))
+            .maybeSingle();
+
+          if (
+            error ||
+            !data ||
+            isAuditLogEmail(data.email) ||
+            String(data.email || '').trim().toLowerCase() !== cleanParsedEmail.toLowerCase()
+          ) {
+            sessionStorage.removeItem('oee_guide_session');
+            if (!isCancelled) {
+              setCurrentUser(null);
+              setIsVerifyingSession(false);
+            }
+            return;
+          }
+
+          const { cleanPassword: dbCleanPass, embeddedRole } = splitPasswordAndRole(data.password);
+          if (!dbCleanPass || dbCleanPass !== parsedCleanPass) {
+            sessionStorage.removeItem('oee_guide_session');
+            if (!isCancelled) {
+              setCurrentUser(null);
+              setIsVerifyingSession(false);
+            }
+            return;
+          }
+
+          const resolvedRole = normalizeUserRole(data.role || embeddedRole || parsed.role, data.is_admin, data.email);
+          const verifiedUser: User = {
+            id: data.id,
+            name: data.name || parsed.name,
+            email: data.email,
+            password: dbCleanPass,
+            isAdmin: resolvedRole === 'admin',
+            role: resolvedRole
+          };
+          sessionStorage.setItem('oee_guide_session', JSON.stringify(verifiedUser));
+          if (!isCancelled) {
+            setCurrentUser(verifiedUser);
+            setIsVerifyingSession(false);
+          }
+          return;
+        }
+
+        // Em modo local fallback, revalida contra o cadastro local
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        const matched = localUsers.find(
+          (u) => typeof u.email === 'string' && u.email.trim().toLowerCase() === cleanParsedEmail.toLowerCase()
+        );
+        if (!matched || splitPasswordAndRole(matched.password).cleanPassword !== parsedCleanPass) {
+          sessionStorage.removeItem('oee_guide_session');
+          if (!isCancelled) {
+            setCurrentUser(null);
+            setIsVerifyingSession(false);
+          }
+          return;
+        }
+
+        const resolvedRole = normalizeUserRole(matched.role, matched.is_admin, matched.email);
+        const verifiedLocalUser: User = {
+          id: matched.id,
+          name: matched.name,
+          email: matched.email,
+          password: parsedCleanPass,
+          isAdmin: resolvedRole === 'admin',
+          role: resolvedRole
+        };
+        sessionStorage.setItem('oee_guide_session', JSON.stringify(verifiedLocalUser));
+        if (!isCancelled) {
+          setCurrentUser(verifiedLocalUser);
+          setIsVerifyingSession(false);
         }
       } catch (e) {
-        console.error("Erro ao ler sessão local:", e);
+        console.error('Erro ao validar sessão:', e);
+        try {
+          sessionStorage.removeItem('oee_guide_session');
+        } catch {}
+        if (!isCancelled) {
+          setCurrentUser(null);
+          setIsVerifyingSession(false);
+        }
       }
-    }
+    };
+
+    restoreAndVerifySession();
+    return () => {
+      isCancelled = true;
+    };
   }, []);
 
   // Proteção de rota para perfil USUÁRIO e DIRETORIA EXECUTIVA (Somente consulta)
@@ -3295,8 +3422,8 @@ ${rowsXml}
     
     try {
       const cleanEmail = loginEmail.trim();
-      if (isAuditLogEmail(cleanEmail)) {
-        setLoginError('E-mail ou senha incorretos.');
+      if (!cleanEmail || !loginPassword || isAuditLogEmail(cleanEmail)) {
+        setLoginError('Informe e-mail e senha válidos para entrar.');
         return;
       }
       const clientDevice = typeof navigator !== 'undefined' 
@@ -3383,18 +3510,23 @@ ${rowsXml}
         });
 
         setCurrentUser(user);
-        localStorage.setItem('oee_guide_session', JSON.stringify(user));
+        sessionStorage.setItem('oee_guide_session', JSON.stringify(user));
         return;
       }
 
-      // No Supabase, busca o usuário ignorando maiúsculas/minúsculas no e-mail
+      // No Supabase, busca o usuário ignorando maiúsculas/minúsculas no e-mail (escapando wildcards SQL)
       const { data, error } = await supabase
         .from('users')
         .select('*')
-        .ilike('email', cleanEmail)
+        .ilike('email', escapeLikePattern(cleanEmail))
         .maybeSingle();
 
-      if (error || !data) {
+      if (
+        error ||
+        !data ||
+        isAuditLogEmail(data.email) ||
+        String(data.email || '').trim().toLowerCase() !== cleanEmail.toLowerCase()
+      ) {
         recordAccessLog({
           user_name: 'Tentativa não autorizada',
           user_email: cleanEmail,
@@ -3407,7 +3539,7 @@ ${rowsXml}
       }
 
       const { cleanPassword, embeddedRole } = splitPasswordAndRole(data.password);
-      const isPasswordValid = await verifyPassword(loginPassword, data.password);
+      const isPasswordValid = cleanPassword.length > 0 && (await verifyPassword(loginPassword, data.password));
       if (!isPasswordValid) {
         recordAccessLog({
           user_name: data.name,
@@ -3455,7 +3587,7 @@ ${rowsXml}
       });
 
       setCurrentUser(user);
-      localStorage.setItem('oee_guide_session', JSON.stringify(user));
+      sessionStorage.setItem('oee_guide_session', JSON.stringify(user));
     } catch (error) {
       console.error('Erro no login:', error);
       setLoginError('Erro de conexão com o banco de dados. Verifique sua conexão de rede.');
@@ -3491,29 +3623,79 @@ ${rowsXml}
         role: normalizeUserRole(profile.userRole, profile.userRole === 'admin', profile.userEmail)
       };
 
-      // Tenta sincronizar papel atualizado no banco caso online
+      // Valida obrigatoriamente no Supabase se o usuário continua ativo e se a senha não foi alterada
       if (!useLocalFallback) {
-        try {
-          const { data } = await supabase
-            .from('users')
-            .select('*')
-            .ilike('email', profile.userEmail)
-            .maybeSingle();
-          if (data) {
-            const { cleanPassword, embeddedRole } = splitPasswordAndRole(data.password);
-            const role = normalizeUserRole(data.role || embeddedRole || profile.userRole, data.is_admin, data.email);
-            resolvedUser = {
-              id: data.id,
-              name: data.name || profile.userName,
-              email: data.email || profile.userEmail,
-              password: cleanPassword || profile.passwordHash,
-              isAdmin: role === 'admin',
-              role
-            };
-          }
-        } catch {
-          // Mantém dados da credencial biométrica vinculada
+        const { data, error: bioFetchErr } = await supabase
+          .from('users')
+          .select('*')
+          .ilike('email', escapeLikePattern(profile.userEmail.trim()))
+          .maybeSingle();
+
+        if (
+          bioFetchErr ||
+          !data ||
+          isAuditLogEmail(data.email) ||
+          String(data.email || '').trim().toLowerCase() !== profile.userEmail.trim().toLowerCase()
+        ) {
+          removeBiometricForEmail(profile.userEmail);
+          setEnrolledBiometrics(getEnrolledBiometricProfiles());
+          await recordAccessLog({
+            user_name: profile.userName,
+            user_email: profile.userEmail,
+            user_role: profile.userRole,
+            status: 'falha',
+            device_info: `Mobile / Leitura Facial (${biometricPlatform.shortLabel})`
+          });
+          setLoginError('Usuário não encontrado ou removido. Entre com E-mail e Senha.');
+          return;
         }
+
+        const { cleanPassword, embeddedRole } = splitPasswordAndRole(data.password);
+        const profileCleanPass = splitPasswordAndRole(profile.passwordHash).cleanPassword;
+        if (!cleanPassword || cleanPassword !== profileCleanPass) {
+          removeBiometricForEmail(profile.userEmail);
+          setEnrolledBiometrics(getEnrolledBiometricProfiles());
+          await recordAccessLog({
+            user_name: data.name || profile.userName,
+            user_email: data.email || profile.userEmail,
+            user_role: data.role || embeddedRole || profile.userRole,
+            status: 'falha',
+            device_info: `Mobile / Leitura Facial (${biometricPlatform.shortLabel})`
+          });
+          setLoginError('Sua senha foi alterada pelo administrador. Faça login novamente com E-mail e Senha para reativar a leitura facial.');
+          return;
+        }
+
+        const role = normalizeUserRole(data.role || embeddedRole || profile.userRole, data.is_admin, data.email);
+        resolvedUser = {
+          id: data.id,
+          name: data.name || profile.userName,
+          email: data.email || profile.userEmail,
+          password: cleanPassword,
+          isAdmin: role === 'admin',
+          role
+        };
+      } else {
+        const localUsers = safeGetLocalStorage<any[]>('oee_local_users', []);
+        const matched = localUsers.find(
+          (u) => typeof u.email === 'string' && u.email.trim().toLowerCase() === profile.userEmail.trim().toLowerCase()
+        );
+        const profileCleanPass = splitPasswordAndRole(profile.passwordHash).cleanPassword;
+        if (!matched || splitPasswordAndRole(matched.password).cleanPassword !== profileCleanPass) {
+          removeBiometricForEmail(profile.userEmail);
+          setEnrolledBiometrics(getEnrolledBiometricProfiles());
+          setLoginError('Usuário ou senha alterados localmente. Entre novamente com E-mail e Senha.');
+          return;
+        }
+        const role = normalizeUserRole(matched.role || profile.userRole, matched.is_admin, matched.email);
+        resolvedUser = {
+          id: matched.id,
+          name: matched.name || profile.userName,
+          email: matched.email || profile.userEmail,
+          password: profileCleanPass,
+          isAdmin: role === 'admin',
+          role
+        };
       }
 
       await recordAccessLog({
@@ -3525,7 +3707,7 @@ ${rowsXml}
       });
 
       setCurrentUser(resolvedUser);
-      localStorage.setItem('oee_guide_session', JSON.stringify(resolvedUser));
+      sessionStorage.setItem('oee_guide_session', JSON.stringify(resolvedUser));
     } catch (err: any) {
       setLoginError(err?.message || 'Erro ao autenticar com Leitura Facial.');
     } finally {
@@ -3535,7 +3717,10 @@ ${rowsXml}
 
   const handleLogout = () => {
     setCurrentUser(null);
-    localStorage.removeItem('oee_guide_session');
+    try {
+      sessionStorage.removeItem('oee_guide_session');
+      localStorage.removeItem('oee_guide_session');
+    } catch {}
     setShowAdminPanel(false);
     setDashboardRecord(null);
     setAiAnalysis('');
@@ -3851,7 +4036,7 @@ ${rowsXml}
           role: resolvedRole
         };
         setCurrentUser(updatedSessionUser);
-        localStorage.setItem('oee_guide_session', JSON.stringify(updatedSessionUser));
+        sessionStorage.setItem('oee_guide_session', JSON.stringify(updatedSessionUser));
       }
 
       setEditingUserOriginalEmail(null);
@@ -4095,6 +4280,15 @@ ${rowsXml}
   };
 
   const formatNumber = (val: number) => val.toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+
+  if (isVerifyingSession) {
+    return (
+      <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4 font-sans gap-4">
+        <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm font-semibold text-slate-300">Verificando credenciais de acesso...</p>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     const activeBioProfile = enrolledBiometrics.find(p => p.userEmail === selectedBiometricEmail) || enrolledBiometrics[0];
